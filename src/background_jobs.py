@@ -25,6 +25,8 @@ from utils.bigquery_client import BigQueryClient
 from async_main import AsyncRedisLayer, POPULARITY_BUCKET_TTL, TTL_VIDEOS_TO_SHOW
 from utils.async_redis_utils import AsyncDragonflyService
 from job_logger import get_job_logger
+import aiohttp
+
 from config import (
     JOB_LOCK_TTL,
     JOB_LOCK_KEY_PREFIX,
@@ -38,7 +40,10 @@ from config import (
     BLOOM_TTL_DAYS,
     TTL_UGC_VIDEOS,
     UGC_POOL_CAPACITY,
+    GCHAT_WEBHOOK_URL,
+    GCHAT_ALERT_MENTION,
 )
+from utils.metrics_utils import hourly_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -658,6 +663,211 @@ async def sync_ugc_pool(
     finally:
         # Always release lock
         await release_job_lock(dragonfly_service.client, job_name)
+
+
+# ============================================================================
+# SYNC JOB 6: GOOGLE CHAT METRICS WEBHOOK
+# ============================================================================
+
+async def send_metrics_to_gchat(
+    dragonfly_service: AsyncDragonflyService,
+    webhook_url: str
+) -> None:
+    """
+    Send 24-hour metrics summary to Google Chat webhook.
+
+    This job runs at 9 AM, 3 PM, 9 PM IST (production only).
+    Uses distributed locking to ensure only one worker sends the message.
+
+    Algorithm:
+        1. Acquire distributed lock for 'gchat_metrics' job
+        2. Get 24h metrics summary from hourly_metrics store
+        3. Format as simple text message for Google Chat
+        4. POST to webhook URL with retries (3 attempts, exponential backoff)
+        5. Release lock
+
+    Args:
+        dragonfly_service: AsyncDragonflyService instance for locking
+        webhook_url: Google Chat webhook URL
+
+    Returns:
+        None
+    """
+    job_name = "gchat_metrics"
+    start_time = time.time()
+
+    # Get job-specific logger
+    job_logger = get_job_logger(job_name, dragonfly_service.client)
+
+    # Try to acquire lock (short TTL since this is a quick job)
+    if not await acquire_job_lock(dragonfly_service.client, job_name, ttl=300):
+        job_logger.info(f"Skipping {job_name} - another worker is handling it")
+        return
+
+    try:
+        job_logger.info("Starting Google Chat metrics report...")
+
+        # Get 24h metrics summary
+        summary = hourly_metrics.get_summary()
+
+        if not summary.get("endpoints"):
+            job_logger.warning("No metrics data available to send")
+            return
+
+        # Format message
+        message = format_gchat_message(summary)
+
+        # Send to webhook with retries
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(3):
+                try:
+                    async with session.post(
+                        webhook_url,
+                        json={"text": message},
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
+                        if resp.status == 200:
+                            job_logger.info(f"Metrics sent to Google Chat (status={resp.status})")
+                            break
+                        else:
+                            body = await resp.text()
+                            job_logger.warning(
+                                f"Webhook returned {resp.status}: {body[:200]}, retrying..."
+                            )
+                except aiohttp.ClientError as e:
+                    job_logger.warning(f"Attempt {attempt + 1} failed: {e}")
+
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+                else:
+                    job_logger.error("All 3 attempts to send webhook failed")
+
+        elapsed = time.time() - start_time
+        job_logger.info(f"Google Chat metrics job completed in {elapsed:.2f}s")
+
+    except Exception as e:
+        job_logger.error(f"Error sending metrics to Google Chat: {e}", exc_info=True)
+        raise
+
+    finally:
+        await release_job_lock(dragonfly_service.client, job_name)
+
+
+def format_gchat_message(summary: dict) -> str:
+    """
+    Format metrics summary as plain text for Google Chat.
+
+    Args:
+        summary: Dict from hourly_metrics.get_summary() with structure:
+            {
+                "window": "24h",
+                "hours_with_data": int,
+                "endpoints": {
+                    "GET /endpoint": {
+                        "total_requests": int,
+                        "errors_4xx": int,
+                        "errors_5xx": int,
+                        "error_rate_pct": float,
+                        "avg_latency_ms": float,
+                        "p50_ms": float,
+                        "p90_ms": float,
+                        "p99_ms": float
+                    }
+                }
+            }
+
+    Returns:
+        Formatted string for Google Chat message
+    """
+    env = os.getenv("ENV", "production")
+    lines = [
+        f"Feed API Metrics Summary ({summary.get('window', '24h')})",
+        f"Environment: {env}",
+        f"Hours with data: {summary.get('hours_with_data', 0)}",
+        ""
+    ]
+
+    for endpoint, stats in summary.get("endpoints", {}).items():
+        total = stats.get("total_requests", 0)
+        err_4xx = stats.get("errors_4xx", 0)
+        err_5xx = stats.get("errors_5xx", 0)
+        err_pct = stats.get("error_rate_pct", 0.0)
+        p50 = stats.get("p50_ms", 0)
+        p90 = stats.get("p90_ms", 0)
+        p99 = stats.get("p99_ms", 0)
+
+        lines.append(endpoint)
+        lines.append(
+            f"  Requests (sampled, 1 worker): {total:,} | "
+            f"Errors: {err_pct:.1f}% (4xx: {err_4xx}, 5xx: {err_5xx})"
+        )
+        lines.append(f"  Latency: p50={p50:.0f}ms | p90={p90:.0f}ms | p99={p99:.0f}ms")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def send_error_alert_to_gchat(
+    webhook_url: str,
+    endpoint: str,
+    status_code: int,
+    user_id: str = None
+) -> None:
+    """
+    Send real-time error alert to Google Chat (fire-and-forget).
+
+    This is called from the middleware when a non-200 response occurs.
+    No retry logic - if it fails, we just log and move on.
+
+    Algorithm:
+        1. Format error message with endpoint, status, user_id, timestamp
+        2. Include @mention for immediate attention
+        3. POST to webhook (single attempt, no retry)
+
+    Args:
+        webhook_url: Google Chat webhook URL
+        endpoint: Normalized endpoint path (e.g., "GET /recommend/{user_id}")
+        status_code: HTTP status code (4xx or 5xx)
+        user_id: User ID from request path if available
+
+    Returns:
+        None
+    """
+    try:
+        env = os.getenv("ENV", "production")
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        # Format message with mention
+        lines = [
+            f"ERROR ALERT {GCHAT_ALERT_MENTION}",
+            "",
+            f"Endpoint: {endpoint}",
+            f"Status: {status_code}",
+        ]
+
+        if user_id:
+            lines.append(f"User ID: {user_id}")
+
+        lines.extend([
+            f"Time: {timestamp}",
+            f"Environment: {env}",
+        ])
+
+        message = "\n".join(lines)
+
+        # Fire-and-forget POST (single attempt)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                webhook_url,
+                json={"text": message},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Error alert webhook returned {resp.status}")
+
+    except Exception as e:
+        # Don't raise - this is fire-and-forget
+        logger.warning(f"Failed to send error alert: {e}")
 
 
 # ============================================================================

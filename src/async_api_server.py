@@ -63,6 +63,9 @@ from background_jobs import (
     sync_freshness_windows,
     sync_user_bloom_filters,
     sync_ugc_pool,
+    send_metrics_to_gchat,
+    send_error_alert_to_gchat,
+    format_gchat_message,
 )
 from job_logger import get_job_logs, clear_job_logs, get_job_log_stats
 from metadata_handler import batch_convert_video_ids, batch_convert_video_ids_v2
@@ -86,6 +89,11 @@ from config import (
     LOG_FORMAT,
     ENABLE_DEBUG_LOGGING,
     REDIS_SEMAPHORE_SIZE,
+    GCHAT_WEBHOOK_URL,
+    GCHAT_METRICS_HOURS_UTC,
+    GCHAT_METRICS_MINUTE_UTC,
+    GCHAT_ERROR_ALERT_LIMIT,
+    GCHAT_ERROR_ALERT_WINDOW,
 )
 
 # Configure logging
@@ -194,6 +202,13 @@ class GlobalCacheStore:
 
 # Global cache instance
 global_cache: GlobalCacheStore = GlobalCacheStore()
+
+# Error alert rate limiter (moved to utils/rate_limiter.py)
+from utils.rate_limiter import ErrorAlertRateLimiter
+error_alert_limiter = ErrorAlertRateLimiter(
+    limit=GCHAT_ERROR_ALERT_LIMIT,
+    window=GCHAT_ERROR_ALERT_WINDOW
+)
 
 
 # ============================================================================
@@ -394,6 +409,23 @@ async def sync_bloom_filters():
         # Don't raise - let scheduler retry at next interval
 
 
+async def send_gchat_metrics_report():
+    """
+    Send metrics summary to Google Chat webhook.
+
+    This job runs at 9 AM, 3 PM, 9 PM IST (production only).
+    Wrapper function that calls the actual job with the webhook URL.
+    """
+    if not GCHAT_WEBHOOK_URL:
+        # No webhook configured - skip silently (expected for stage)
+        return
+
+    try:
+        await send_metrics_to_gchat(dragonfly_service, GCHAT_WEBHOOK_URL)
+    except Exception as e:
+        logger.error(f"Error sending metrics to Google Chat: {e}", exc_info=True)
+
+
 async def refresh_global_cache():
     """
     Background job to refresh global cache with 1000 videos.
@@ -539,6 +571,26 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         misfire_grace_time=60,
     )
+
+    # Add Google Chat metrics job (production only)
+    # Sends metrics summary at 9 AM, 3 PM, 9 PM IST (3:30, 9:30, 15:30 UTC)
+    if GCHAT_WEBHOOK_URL:
+        scheduler.add_job(
+            send_gchat_metrics_report,
+            "cron",
+            hour=",".join(str(h) for h in GCHAT_METRICS_HOURS_UTC),
+            minute=GCHAT_METRICS_MINUTE_UTC,
+            id="send_gchat_metrics",
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+        logger.info(
+            f"Google Chat metrics job scheduled at "
+            f"{GCHAT_METRICS_HOURS_UTC}:{GCHAT_METRICS_MINUTE_UTC:02d} UTC"
+        )
+    else:
+        logger.info("GCHAT_WEBHOOK_URL not set - metrics alerts disabled")
 
     # Note: User feed refills happen automatically via fetch_videos() auto-refill
     # No scheduled job needed for this
@@ -945,6 +997,22 @@ async def metric_summary():
         including total_requests, avg_latency_ms, p50_ms, p90_ms, p99_ms
     """
     return hourly_metrics.get_summary()
+
+
+@app.get("/gchat-metrics-preview")
+async def gchat_metrics_preview():
+    """
+    Preview the Google Chat metrics message format.
+
+    Returns the exact text that would be sent to Google Chat webhook.
+    Useful for testing/debugging the message format without waiting for scheduled job.
+
+    Returns:
+        PlainTextResponse with formatted metrics message
+    """
+    summary = hourly_metrics.get_summary()
+    message = format_gchat_message(summary)
+    return PlainTextResponse(content=message, media_type="text/plain")
 
 
 @app.get("/feed-stats/{user_id}")
@@ -1583,6 +1651,32 @@ def _normalize_endpoint(path: str) -> str:
     return path
 
 
+def _extract_user_id(path: str) -> str:
+    """
+    Extract user_id from request path if present.
+
+    Args:
+        path: Raw URL path like /recommend/abc123
+
+    Returns:
+        User ID if found, None otherwise
+    """
+    import re
+    patterns = [
+        r'/recommend/([^/]+)',
+        r'/recommend-with-metadata/([^/]+)',
+        r'/v2/recommend-with-metadata/([^/]+)',
+        r'/feedback/([^/]+)',
+        r'/feed-stats/([^/]+)',
+        r'/debug/user/([^/]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, path)
+        if match:
+            return match.group(1)
+    return None
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """
@@ -1634,6 +1728,21 @@ async def log_requests(request: Request, call_next):
 
         # Record to hourly metrics for /metric_summary endpoint (includes error tracking)
         hourly_metrics.record(f"{request.method} {endpoint}", duration, response.status_code)
+
+        # Send error alert to Google Chat (if configured and within rate limit)
+        if response.status_code >= 400 and GCHAT_WEBHOOK_URL:
+            full_endpoint = f"{request.method} {endpoint}"
+            if error_alert_limiter.should_alert(full_endpoint):
+                user_id = _extract_user_id(request.url.path)
+                # Fire-and-forget: don't await, don't block response
+                asyncio.create_task(
+                    send_error_alert_to_gchat(
+                        GCHAT_WEBHOOK_URL,
+                        full_endpoint,
+                        response.status_code,
+                        user_id
+                    )
+                )
 
         # Log response at DEBUG level (respects LOG_LEVEL setting)
         logger.debug(

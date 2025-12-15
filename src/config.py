@@ -254,6 +254,23 @@ RATE_LIMIT_REQUESTS = 100  # Requests per minute
 RATE_LIMIT_WINDOW = 60  # Window in seconds
 
 # ============================================================================
+# GOOGLE CHAT WEBHOOK (PRODUCTION ONLY)
+# ============================================================================
+
+# Webhook URL for metrics alerts - only set in production CI
+# Stage servers will not send alerts (safe fallback when unset)
+GCHAT_WEBHOOK_URL = os.getenv("GCHAT_WEBHOOK_URL", "")
+
+# Schedule: 9 AM, 3 PM, 9 PM IST = 3:30, 9:30, 15:30 UTC
+GCHAT_METRICS_HOURS_UTC = [3, 9, 15]
+GCHAT_METRICS_MINUTE_UTC = 30
+
+# Error alert rate limiting
+GCHAT_ERROR_ALERT_LIMIT = 4  # Max alerts per endpoint per minute
+GCHAT_ERROR_ALERT_WINDOW = 60  # Window in seconds
+GCHAT_ALERT_MENTION = "<users/jay@gobazzinga.io>"  # User to mention on errors
+
+# ============================================================================
 # MONITORING AND METRICS
 # ============================================================================
 
