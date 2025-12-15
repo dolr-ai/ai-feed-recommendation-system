@@ -1,0 +1,34 @@
+# Core dependencies
+redis[hiredis]==5.0.1  # Async support with C parser for performance
+fastapi==0.104.0
+uvicorn[standard]==0.24.0
+pydantic==2.4.0
+
+# Data processing
+pandas==2.1.0
+numpy==1.26.0
+
+# BigQuery and Google Cloud
+google-cloud-bigquery==3.13.0
+google-auth==2.25.0
+db-dtypes==1.4.3  # Required for BigQuery DataFrame conversion
+
+# Background jobs
+apscheduler==3.10.0
+
+# Monitoring
+prometheus-client==0.18.0
+
+# API extras
+python-multipart==0.0.6
+httpx==0.25.0
+
+# Development
+pytest==7.4.3
+pytest-asyncio==0.21.0
+black==23.10.0
+isort==5.12.0
+dotenv
+
+# Error tracking and performance monitoring
+sentry-sdk[fastapi]

@@ -1,0 +1,83 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv pip install --system -r requirements.txt
+          uv pip install --system pytest pytest-asyncio httpx
+
+      - name: Run tests
+        env:
+          STAGE_DRAGONFLY_HOST: ${{ secrets.STAGE_DRAGONFLY_HOST }}
+          STAGE_DRAGONFLY_PORT: ${{ secrets.STAGE_DRAGONFLY_PORT }}
+          STAGE_DRAGONFLY_PASSWORD: ${{ secrets.STAGE_DRAGONFLY_PASSWORD }}
+          STAGE_DRAGONFLY_TLS_ENABLED: "false"
+          STAGE_DRAGONFLY_CLUSTER_ENABLED: "false"
+        run: |
+          pytest tests/ -v --tb=short
+
+  deploy:
+    name: Deploy to Fly.io (Production)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [test]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Set Fly secrets
+        run: |
+          flyctl secrets set \
+            DRAGONFLY_HOST="$DRAGONFLY_HOST" \
+            DRAGONFLY_PORT="$DRAGONFLY_PORT" \
+            DRAGONFLY_PASSWORD="$DRAGONFLY_PASSWORD" \
+            DRAGONFLY_CLUSTER_ENABLED="false" \
+            DRAGONFLY_TLS_ENABLED="true" \
+            METADATA_REDIS_HOST="$METADATA_REDIS_HOST" \
+            METADATA_REDIS_PORT="$METADATA_REDIS_PORT" \
+            METADATA_REDIS_AUTHKEY="$METADATA_REDIS_AUTHKEY" \
+            --app recsys-on-premise
+          flyctl secrets set SERVICE_CRED="$SERVICE_CRED" --app recsys-on-premise
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_PROD_DEPLOY_TOKEN }}
+          DRAGONFLY_HOST: ${{ secrets.PROD_DRAGONFLY_HOST }}
+          DRAGONFLY_PORT: ${{ secrets.PROD_DRAGONFLY_PORT }}
+          DRAGONFLY_PASSWORD: ${{ secrets.PROD_DRAGONFLY_PASSWORD }}
+          SERVICE_CRED: ${{ secrets.SERVICE_CRED }}
+          METADATA_REDIS_HOST: ${{ secrets.METADATA_REDIS_HOST }}
+          METADATA_REDIS_PORT: ${{ secrets.METADATA_REDIS_PORT }}
+          METADATA_REDIS_AUTHKEY: ${{ secrets.METADATA_REDIS_AUTHKEY }}
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --config fly_prod.toml --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_PROD_DEPLOY_TOKEN }}

@@ -1,0 +1,62 @@
+# Python
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# Git
+.git/
+.gitignore
+
+# Environment and config
+.env
+.env.*
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Documentation
+*.md
+docs/
+
+# Testing
+stress_testing_recommendation/
+stress_probe.py
+src/tests/
+src/redis_testing.py
+
+# Local development
+redis-local-setup/
+entrypoint_local.sh
+
+# Temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Results and data
+results_*/
+data/
+*.csv
+
+# WARP specific
+WARP.md

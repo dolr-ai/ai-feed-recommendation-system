@@ -1,0 +1,55 @@
+# Fly.io configuration for Recommendation System
+app = "recsys-on-premise"
+primary_region = "iad"  # US East - change to region closest to your Redis
+organization = "yral-ds"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Disable debug logging for production
+  ENABLE_DEBUG_LOGGING = "false"
+  ENABLE_LUA_SCRIPT_LOGGING = "false"
+  LOG_LEVEL = "WARNING"
+
+  # Port configuration
+  PORT = "8000"
+
+  # Python optimization
+  PYTHONUNBUFFERED = "1"
+  PYTHONDONTWRITEBYTECODE = "1"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 500
+    soft_limit = 250
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "10s"
+  grace_period = "60s"
+  method = "GET"
+  path = "/health"
+
+[metrics]
+  port = 8000
+  path = "/metrics"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
+
+[deploy]
+  strategy = "rolling"
+  max_unavailable = 1
+
+[processes]
+  app = ""
