@@ -269,6 +269,7 @@ GCHAT_METRICS_MINUTE_UTC = 30
 GCHAT_ERROR_ALERT_LIMIT = 4  # Max alerts per endpoint per minute
 GCHAT_ERROR_ALERT_WINDOW = 60  # Window in seconds
 GCHAT_ALERT_MENTION = "<users/jay@gobazzinga.io>"  # User to mention on errors
+GCHAT_EXCLUDED_STATUS_CODES = {404}  # Client errors to exclude from alerts (noise)
 
 # ============================================================================
 # MONITORING AND METRICS

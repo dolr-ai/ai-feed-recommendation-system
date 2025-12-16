@@ -94,6 +94,7 @@ from config import (
     GCHAT_METRICS_MINUTE_UTC,
     GCHAT_ERROR_ALERT_LIMIT,
     GCHAT_ERROR_ALERT_WINDOW,
+    GCHAT_EXCLUDED_STATUS_CODES,
 )
 
 # Configure logging
@@ -1730,7 +1731,9 @@ async def log_requests(request: Request, call_next):
         hourly_metrics.record(f"{request.method} {endpoint}", duration, response.status_code)
 
         # Send error alert to Google Chat (if configured and within rate limit)
-        if response.status_code >= 400 and GCHAT_WEBHOOK_URL:
+        if (response.status_code >= 400
+            and GCHAT_WEBHOOK_URL
+            and response.status_code not in GCHAT_EXCLUDED_STATUS_CODES):
             full_endpoint = f"{request.method} {endpoint}"
             if error_alert_limiter.should_alert(full_endpoint):
                 user_id = _extract_user_id(request.url.path)
