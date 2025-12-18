@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import redis
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from config import STUBBED_CANISTER_ID
 
 logger = logging.getLogger(__name__)
 
@@ -663,7 +664,7 @@ class MetadataHandler:
                 results.append(
                     {
                         "video_id": video_id,
-                        "canister_id": mapping["canister_id"],
+                        "canister_id": STUBBED_CANISTER_ID,
                         "post_id": str(mapping["post_id"]),
                         "publisher_user_id": publisher_user_id,
                     }
@@ -673,7 +674,7 @@ class MetadataHandler:
                 results.append(
                     {
                         "video_id": video_id,
-                        "canister_id": str(prev_canister_id),
+                        "canister_id": STUBBED_CANISTER_ID,
                         "post_id": str(prev_post_id),
                         "publisher_user_id": publisher_user_id,
                     }
@@ -733,10 +734,10 @@ class MetadataHandler:
             # Get view counts (default to 0 if not found)
             # num_views_loggedin, num_views_all = view_counts.get(video_id, (0, 0))
 
-            # Build v2 result
+            # Build v2 result (canister_id already stubbed from v1)
             v2_data = {
                 "video_id": video_id,
-                "canister_id": "ivkka-7qaaa-aaaas-qbg3q-cai" if v1_data["canister_id"] == "2vxsx-fae" else v1_data["canister_id"],
+                "canister_id": v1_data["canister_id"],
                 "post_id": v1_data["post_id"],
                 "publisher_user_id": v1_data["publisher_user_id"],
                 "num_views_loggedin": 0,

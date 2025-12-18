@@ -302,6 +302,9 @@ LOG_FILE = "recommendation_system.log"
 # FEATURE FLAGS
 # ============================================================================
 
+# Stubbed canister ID - all metadata endpoints return this value
+STUBBED_CANISTER_ID = "ivkka-7qaaa-aaaas-qbg3q-cai"
+
 # Enable/disable specific features
 FEATURES = {
     "enable_semantic_search": False,  # Not implemented yet
