@@ -15,6 +15,7 @@ import time
 import logging
 import asyncio
 import random
+import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from contextlib import asynccontextmanager
@@ -1719,7 +1720,7 @@ async def register_tournament(
         tournament_id = str(uuid.uuid4())
 
     try:
-        # Fetch large pool of tournament-eligible videos from BigQuery
+        # Fetch large pool of tournament-eligible videos WITH metadata from BigQuery
         # Using 10000 pool enables natural cascade through popularity tiers
         bq_client = BigQueryClient()
         candidates_df = bq_client.fetch_tournament_eligible_videos(
@@ -1748,45 +1749,49 @@ async def register_tournament(
         fresh_df = candidates_df[~candidates_df["video_id"].isin(recently_used)]
 
         # Take top N from filtered results (natural cascade through popularity)
-        selected_videos = fresh_df["video_id"].head(video_count).tolist()
+        selected_df = fresh_df.head(video_count)
 
         # If not enough fresh videos after filtering all 10000, allow partial overlap
-        if len(selected_videos) < video_count:
-            needed = video_count - len(selected_videos)
+        if len(selected_df) < video_count:
+            needed = video_count - len(selected_df)
 
             # Use cached original DataFrame to get recently-used videos (ordered by popularity)
-            overlapping = original_candidates_df[
+            overlapping_df = original_candidates_df[
                 original_candidates_df["video_id"].isin(recently_used)
-            ]["video_id"].head(needed).tolist()
-            selected_videos.extend(overlapping)
+            ].head(needed)
+
+            # Combine fresh and overlapping DataFrames
+            selected_df = pd.concat([selected_df, overlapping_df], ignore_index=True)
 
             logger.warning(
-                f"Tournament {tournament_id}: Using {len(overlapping)} overlapping videos "
+                f"Tournament {tournament_id}: Using {len(overlapping_df)} overlapping videos "
                 f"due to insufficient fresh videos in pool of {TOURNAMENT_VIDEO_POOL_SIZE}"
             )
 
-        # Final check: do we have enough?
-        if len(selected_videos) < video_count:
+        if len(selected_df) < video_count:
             raise HTTPException(
                 status_code=503,
                 detail={
                     "error": "insufficient_videos",
-                    "message": f"Only {len(selected_videos)} eligible videos available, need {video_count}",
-                    "available_count": len(selected_videos),
+                    "message": f"Only {len(selected_df)} eligible videos available, need {video_count}",
+                    "available_count": len(selected_df),
                     "requested_count": video_count
                 }
             )
 
-        # Store tournament videos in Redis
-        result = await redis_layer.store_tournament_videos(tournament_id, selected_videos)
+        videos_with_metadata = selected_df[
+            ["video_id", "canister_id", "post_id", "publisher_user_id"]
+        ].to_dict("records")
+
+        result = await redis_layer.store_tournament_videos(tournament_id, videos_with_metadata)
 
         logger.info(
-            f"Tournament {tournament_id} registered with {len(selected_videos)} videos"
+            f"Tournament {tournament_id} registered with {len(videos_with_metadata)} videos (with metadata)"
         )
 
         return TournamentRegisterResponse(
             tournament_id=tournament_id,
-            video_count=len(selected_videos),
+            video_count=len(videos_with_metadata),
             created_at=result["created_at"]
         )
 
@@ -1817,12 +1822,12 @@ async def get_tournament_videos(
 
     This endpoint returns the pre-generated video set for a tournament.
     Videos are returned in the order they were selected (by popularity score).
+    Metadata is pre-stored 
 
     Algorithm:
-        1. Check if tournament exists
-        2. Fetch video IDs from Redis
-        3. If with_metadata=true, fetch metadata from BigQuery/Redis
-        4. Return video list
+        1. Fetch videos from Redis (with or without metadata)
+        2. If not found, return 404
+        3. Return video list
 
     Args:
         tournament_id: Tournament identifier
@@ -1835,37 +1840,45 @@ async def get_tournament_videos(
         HTTPException 404: Tournament not found
     """
     try:
-        # Fetch tournament videos
-        video_ids = await redis_layer.get_tournament_videos(tournament_id)
-
-        if video_ids is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "tournament_not_found",
-                    "message": f"Tournament {tournament_id} does not exist"
-                }
-            )
-
         if with_metadata:
-            # Fetch metadata for videos
-            # batch_convert_video_ids returns list of VideoMetadata dicts
-            metadata_list = await batch_convert_video_ids(video_ids)
+            # Fetch videos with full metadata from Redis (pre-stored at registration)
+            videos_data = await redis_layer.get_tournament_videos(tournament_id, with_metadata=True)
+
+            if videos_data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "tournament_not_found",
+                        "message": f"Tournament {tournament_id} does not exist"
+                    }
+                )
 
             return TournamentVideosWithMetadataResponse(
                 tournament_id=tournament_id,
-                video_count=len(metadata_list),
+                video_count=len(videos_data),
                 videos=[
                     VideoMetadata(
-                        video_id=m["video_id"],
-                        canister_id=m["canister_id"],
-                        post_id=m["post_id"],
-                        publisher_user_id=m["publisher_user_id"]
+                        video_id=str(v["video_id"]),
+                        canister_id=str(v["canister_id"]),
+                        post_id=str(v["post_id"]),
+                        publisher_user_id=str(v["publisher_user_id"])
                     )
-                    for m in metadata_list
+                    for v in videos_data
                 ]
             )
         else:
+            # Fetch just video IDs from Redis
+            video_ids = await redis_layer.get_tournament_videos(tournament_id, with_metadata=False)
+
+            if video_ids is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "tournament_not_found",
+                        "message": f"Tournament {tournament_id} does not exist"
+                    }
+                )
+
             return TournamentVideosResponse(
                 tournament_id=tournament_id,
                 video_count=len(video_ids),

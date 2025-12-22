@@ -32,7 +32,7 @@ import random
 import json
 import logging
 import asyncio
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Union
 from utils.async_redis_utils import AsyncDragonflyService
 
 logger = logging.getLogger(__name__)
@@ -2488,21 +2488,25 @@ class AsyncRedisLayer:
     async def store_tournament_videos(
         self,
         tournament_id: str,
-        video_ids: List[str]
+        videos_with_metadata: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Store video set for a tournament and track videos as recently used.
+        Store video set with metadata for a tournament and track videos as recently used.
 
         Algorithm:
-            1. Store video IDs in a Redis LIST (preserves order)
-            2. Store metadata in a HASH (created_at, video_count)
+            1. Store videos as JSON strings in a Redis LIST (preserves order + includes metadata)
+            2. Store tournament metadata in a HASH (created_at, video_count)
             3. Set TTL on both keys (3 days)
             4. Add video IDs to recent_videos ZSET with current timestamp
             5. Cleanup old entries from recent_videos ZSET
 
         Args:
             tournament_id: Unique tournament identifier
-            video_ids: List of video IDs selected for this tournament
+            videos_with_metadata: List of dicts, each containing:
+                - video_id (str): Video identifier
+                - canister_id (str): Canister ID
+                - post_id (int/str): Post ID
+                - publisher_user_id (str): Publisher user ID
 
         Returns:
             dict: {created_at: str, video_count: int}
@@ -2519,21 +2523,24 @@ class AsyncRedisLayer:
         # Use pipeline for atomicity
         pipe = client.pipeline()
 
-        # Store videos as LIST (preserves insertion order)
+        # Store videos as JSON strings in LIST (preserves order + metadata)
         pipe.delete(videos_key)
-        if video_ids:
-            pipe.rpush(videos_key, *video_ids)
+        if videos_with_metadata:
+            # Convert each video dict to JSON string for storage
+            json_videos = [json.dumps(v) for v in videos_with_metadata]
+            pipe.rpush(videos_key, *json_videos)
         pipe.expire(videos_key, TOURNAMENT_TTL_SECONDS)
 
-        # Store metadata
+        # Store tournament metadata
         pipe.hset(meta_key, mapping={
             "created_at": created_at,
-            "video_count": len(video_ids)
+            "video_count": len(videos_with_metadata)
         })
         pipe.expire(meta_key, TOURNAMENT_TTL_SECONDS)
 
-        # Track these videos as recently used
+        # Track these videos as recently used (by video_id)
         # Score = timestamp when added to tournament
+        video_ids = [v["video_id"] for v in videos_with_metadata]
         video_scores = {vid: current_time for vid in video_ids}
         if video_scores:
             pipe.zadd(recent_key, video_scores)
@@ -2545,30 +2552,38 @@ class AsyncRedisLayer:
         await pipe.execute()
 
         logger.info(
-            f"Stored tournament {tournament_id} with {len(video_ids)} videos, "
+            f"Stored tournament {tournament_id} with {len(videos_with_metadata)} videos (with metadata), "
             f"TTL={TOURNAMENT_TTL_SECONDS}s"
         )
 
         return {
             "created_at": created_at,
-            "video_count": len(video_ids)
+            "video_count": len(videos_with_metadata)
         }
 
-    async def get_tournament_videos(self, tournament_id: str) -> Optional[List[str]]:
+    async def get_tournament_videos(
+        self,
+        tournament_id: str,
+        with_metadata: bool = False
+    ) -> Optional[Union[List[str], List[Dict[str, Any]]]]:
         """
-        Retrieve video set for a tournament.
+        Retrieve video set for a tournament, optionally with metadata.
 
         Algorithm:
             1. Check if tournament videos key exists
             2. If not, return None (tournament not found)
-            3. Fetch all video IDs from LIST
-            4. Return as list (preserves order)
+            3. Fetch all video entries from LIST (stored as JSON strings)
+            4. If with_metadata=True, parse JSON and return full dicts
+            5. If with_metadata=False, parse JSON and return just video_ids
 
         Args:
             tournament_id: Tournament identifier
+            with_metadata: If True, return full metadata dicts; if False, return just video_ids
 
         Returns:
-            List[str] if tournament exists, None otherwise
+            If with_metadata=True: List[Dict] with video_id, canister_id, post_id, publisher_user_id
+            If with_metadata=False: List[str] of video_ids
+            None if tournament not found
         """
         videos_key = self._key_tournament_videos(tournament_id)
 
@@ -2577,9 +2592,16 @@ class AsyncRedisLayer:
             return None
 
         client = await self.db.get_client()
-        video_ids = await client.lrange(videos_key, 0, -1)
+        json_entries = await client.lrange(videos_key, 0, -1)
 
-        return video_ids
+        # Parse JSON entries
+        videos = [json.loads(entry) for entry in json_entries]
+
+        if with_metadata:
+            return videos
+        else:
+            # Extract just video_ids
+            return [v["video_id"] for v in videos]
 
     async def get_tournament_meta(self, tournament_id: str) -> Optional[Dict[str, Any]]:
         """

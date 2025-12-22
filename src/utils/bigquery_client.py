@@ -532,19 +532,23 @@ class BigQueryClient:
 
     def fetch_tournament_eligible_videos(self, limit: int = 10000) -> pd.DataFrame:
         """
-        Fetch tournament-eligible videos (bot_uploaded/AI content, top popularity).
+        Fetch tournament-eligible videos WITH metadata (canister_id, post_id, publisher_user_id).
 
         This function returns a large pool of videos suitable for tournaments,
         prioritizing bot-uploaded and AI-generated content with high popularity scores.
-        The large pool size enables natural cascade through popularity tiers when
-        recently-used videos are filtered out.
+        Only videos with valid metadata (present in ai_ugc or bot_uploaded_content tables)
+        are returned, ensuring all tournament videos can be resolved to canister/post IDs.
 
         Algorithm:
-            1. Query global_popular_videos_l7d table
-            2. Filter to is_bot_uploaded = TRUE (bot/AI content only)
-            3. Filter to is_nsfw = FALSE (no NSFW content)
-            4. Order by global_popularity_score DESC (best performers first)
-            5. Return top N videos (default 10000 for large pool)
+            1. Query global_popular_videos_l7d table for popularity-ranked videos
+            2. LEFT JOIN with ai_ugc table for AI content metadata
+            3. LEFT JOIN with bot_uploaded_content table for bot content metadata
+            4. Filter to is_bot_uploaded = TRUE (bot/AI content only)
+            5. Filter to is_nsfw = FALSE (no NSFW content)
+            6. Filter to videos that have metadata in at least one table
+            7. COALESCE metadata from ai_ugc (priority) or bot_uploaded_content
+            8. Order by global_popularity_score DESC (best performers first)
+            9. Return top N videos with full metadata
 
         Args:
             limit: Number of videos to fetch (default 10000 for cascade support)
@@ -553,26 +557,35 @@ class BigQueryClient:
             DataFrame with columns:
                 - video_id (STRING): The video identifier
                 - global_popularity_score (FLOAT64): Popularity score for ranking
+                - canister_id (STRING): Canister ID for the video
+                - post_id (INT64): Post ID within the canister
+                - publisher_user_id (STRING): User ID of the publisher
 
         Example:
             >>> bq_client = BigQueryClient()
             >>> df = bq_client.fetch_tournament_eligible_videos(limit=10000)
-            >>> print(len(df))
-            10000
+            >>> print(df.columns.tolist())
+            ['video_id', 'global_popularity_score', 'canister_id', 'post_id', 'publisher_user_id']
         """
         query = f"""
         SELECT
-            video_id,
-            global_popularity_score
-        FROM `{self.project_id}.{self.dataset}.global_popular_videos_l7d`
-        WHERE is_bot_uploaded = TRUE
-          AND (is_nsfw = FALSE OR is_nsfw IS NULL)
-          AND global_popularity_score IS NOT NULL
-        ORDER BY global_popularity_score DESC
+            p.video_id,
+            p.global_popularity_score,
+            COALESCE(a.upload_canister_id, b.canister_id) as canister_id,
+            COALESCE(a.post_id, b.post_id) as post_id,
+            COALESCE(a.publisher_user_id, b.publisher_user_id) as publisher_user_id
+        FROM `{self.project_id}.{self.dataset}.global_popular_videos_l7d` p
+        LEFT JOIN `{self.project_id}.{self.dataset}.ai_ugc` a ON p.video_id = a.video_id
+        LEFT JOIN `{self.project_id}.{self.dataset}.bot_uploaded_content` b ON p.video_id = b.video_id
+        WHERE p.is_bot_uploaded = TRUE
+          AND (p.is_nsfw = FALSE OR p.is_nsfw IS NULL)
+          AND p.global_popularity_score IS NOT NULL
+          AND (a.video_id IS NOT NULL OR b.video_id IS NOT NULL)
+        ORDER BY p.global_popularity_score DESC
         LIMIT {limit}
         """
 
-        logger.info(f"Fetching tournament-eligible videos (pool_size={limit})")
+        logger.info(f"Fetching tournament-eligible videos with metadata (pool_size={limit})")
         return self._execute_query_with_retry(query)
 
     def _execute_query_with_retry(
