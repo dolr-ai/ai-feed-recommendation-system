@@ -79,6 +79,8 @@ from config import (
     FOLLOWING_SYNC_COOLDOWN,
     FOLLOWING_REFILL_THRESHOLD,
     TTL_UGC_VIDEOS,
+    TOURNAMENT_TTL_SECONDS,
+    TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS,
 )
 
 # TTL safety margin (consider videos with < 1% TTL remaining as expired)
@@ -1091,6 +1093,18 @@ class AsyncRedisLayer:
     def _key_following_last_sync(self, user_id: str) -> str:
         """Key for tracking last sync timestamp for user's following pool."""
         return f"user:{user_id}:following:last_sync"
+
+    def _key_tournament_videos(self, tournament_id: str) -> str:
+        """Key for storing tournament video list."""
+        return f"tournament:{tournament_id}:videos"
+
+    def _key_tournament_meta(self, tournament_id: str) -> str:
+        """Key for storing tournament metadata (created_at, video_count)."""
+        return f"tournament:{tournament_id}:meta"
+
+    def _key_tournament_recent_videos(self) -> str:
+        """Key for tracking recently-used tournament videos (ZSET with timestamps)."""
+        return "tournament:recent_videos"
 
     # ------------------------------------------------------------------------
     # Bloom Filter Operations (ASYNC VERSIONS)
@@ -2421,3 +2435,181 @@ class AsyncRedisLayer:
 
         lines.append(f"{'='*60}\n")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------------
+    # Tournament Operations
+    # ------------------------------------------------------------------------
+
+    async def tournament_exists(self, tournament_id: str) -> bool:
+        """
+        Check if a tournament with the given ID already exists.
+
+        Algorithm:
+            1. Check if tournament videos key exists in Redis
+            2. Return True if exists, False otherwise
+
+        Args:
+            tournament_id: Unique tournament identifier
+
+        Returns:
+            bool: True if tournament exists, False otherwise
+        """
+        videos_key = self._key_tournament_videos(tournament_id)
+        exists = await self.db.exists(videos_key)
+        return exists > 0
+
+    async def get_recently_used_tournament_videos(self) -> set:
+        """
+        Get set of video IDs used in tournaments within the reuse cooldown window.
+
+        Algorithm:
+            1. Get current timestamp
+            2. Calculate cutoff timestamp (now - cooldown period)
+            3. Fetch video IDs from ZSET with score > cutoff
+            4. Return as set for O(1) lookup
+
+        Returns:
+            set: Set of video IDs used in recent tournaments
+        """
+        recent_key = self._key_tournament_recent_videos()
+        current_time = int(time.time())
+        cutoff_time = current_time - TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS
+
+        # Get videos with timestamp > cutoff (i.e., within cooldown window)
+        client = await self.db.get_client()
+        recent_videos = await client.zrangebyscore(
+            recent_key,
+            min=cutoff_time,
+            max="+inf"
+        )
+
+        return set(recent_videos)
+
+    async def store_tournament_videos(
+        self,
+        tournament_id: str,
+        video_ids: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Store video set for a tournament and track videos as recently used.
+
+        Algorithm:
+            1. Store video IDs in a Redis LIST (preserves order)
+            2. Store metadata in a HASH (created_at, video_count)
+            3. Set TTL on both keys (3 days)
+            4. Add video IDs to recent_videos ZSET with current timestamp
+            5. Cleanup old entries from recent_videos ZSET
+
+        Args:
+            tournament_id: Unique tournament identifier
+            video_ids: List of video IDs selected for this tournament
+
+        Returns:
+            dict: {created_at: str, video_count: int}
+        """
+        videos_key = self._key_tournament_videos(tournament_id)
+        meta_key = self._key_tournament_meta(tournament_id)
+        recent_key = self._key_tournament_recent_videos()
+
+        current_time = int(time.time())
+        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time))
+
+        client = await self.db.get_client()
+
+        # Use pipeline for atomicity
+        pipe = client.pipeline()
+
+        # Store videos as LIST (preserves insertion order)
+        pipe.delete(videos_key)
+        if video_ids:
+            pipe.rpush(videos_key, *video_ids)
+        pipe.expire(videos_key, TOURNAMENT_TTL_SECONDS)
+
+        # Store metadata
+        pipe.hset(meta_key, mapping={
+            "created_at": created_at,
+            "video_count": len(video_ids)
+        })
+        pipe.expire(meta_key, TOURNAMENT_TTL_SECONDS)
+
+        # Track these videos as recently used
+        # Score = timestamp when added to tournament
+        video_scores = {vid: current_time for vid in video_ids}
+        if video_scores:
+            pipe.zadd(recent_key, video_scores)
+
+        # Cleanup old entries from recent_videos (older than cooldown period)
+        cutoff_time = current_time - TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS
+        pipe.zremrangebyscore(recent_key, "-inf", cutoff_time)
+
+        await pipe.execute()
+
+        logger.info(
+            f"Stored tournament {tournament_id} with {len(video_ids)} videos, "
+            f"TTL={TOURNAMENT_TTL_SECONDS}s"
+        )
+
+        return {
+            "created_at": created_at,
+            "video_count": len(video_ids)
+        }
+
+    async def get_tournament_videos(self, tournament_id: str) -> Optional[List[str]]:
+        """
+        Retrieve video set for a tournament.
+
+        Algorithm:
+            1. Check if tournament videos key exists
+            2. If not, return None (tournament not found)
+            3. Fetch all video IDs from LIST
+            4. Return as list (preserves order)
+
+        Args:
+            tournament_id: Tournament identifier
+
+        Returns:
+            List[str] if tournament exists, None otherwise
+        """
+        videos_key = self._key_tournament_videos(tournament_id)
+
+        # Check existence first
+        if not await self.db.exists(videos_key):
+            return None
+
+        client = await self.db.get_client()
+        video_ids = await client.lrange(videos_key, 0, -1)
+
+        return video_ids
+
+    async def get_tournament_meta(self, tournament_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve metadata for a tournament.
+
+        Algorithm:
+            1. Check if tournament meta key exists
+            2. If not, return None
+            3. Fetch all fields from HASH
+            4. Return as dict
+
+        Args:
+            tournament_id: Tournament identifier
+
+        Returns:
+            dict with created_at, video_count if exists, None otherwise
+        """
+        meta_key = self._key_tournament_meta(tournament_id)
+
+        # Check existence first
+        if not await self.db.exists(meta_key):
+            return None
+
+        client = await self.db.get_client()
+        meta = await client.hgetall(meta_key)
+
+        if not meta:
+            return None
+
+        return {
+            "created_at": meta.get("created_at", ""),
+            "video_count": int(meta.get("video_count", 0))
+        }

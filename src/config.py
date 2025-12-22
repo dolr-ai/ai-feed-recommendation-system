@@ -174,6 +174,29 @@ FOLLOWING_SEGMENT_2_RANGE = (11, 50)  # Positions 11-50
 FOLLOWING_SEGMENT_2_MIN = 10          # At least 10 from following in segment 2
 
 # ============================================================================
+# TOURNAMENT CONFIGURATION
+# ============================================================================
+
+# Tournament TTL - auto-expire tournament data after this period
+TOURNAMENT_TTL_DAYS = 3
+TOURNAMENT_TTL_SECONDS = TOURNAMENT_TTL_DAYS * 24 * 60 * 60  # 3 days in seconds
+
+# Video reuse cooldown - prevent same videos appearing in tournaments too frequently
+TOURNAMENT_VIDEO_REUSE_COOLDOWN_DAYS = 7
+TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS = TOURNAMENT_VIDEO_REUSE_COOLDOWN_DAYS * 24 * 60 * 60
+
+# Admin API key for tournament registration endpoint
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+# BigQuery table for tournament-eligible videos
+TOURNAMENT_VIDEO_TABLE = "yral_ds.global_popular_videos_l7d"
+
+# Large pool size for fetching tournament videos - enables natural cascade through popularity
+# When filtering out recently-used videos, having a large pool ensures we can still
+# select the required number of videos from lower popularity tiers
+TOURNAMENT_VIDEO_POOL_SIZE = 10000
+
+# ============================================================================
 # BACKGROUND JOB SCHEDULES (in seconds)
 # ============================================================================
 

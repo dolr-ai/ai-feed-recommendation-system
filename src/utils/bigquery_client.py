@@ -530,6 +530,51 @@ class BigQueryClient:
         logger.info(f"Fetching followed users content for user_id={user_id}, num_videos={num_videos}")
         return self._execute_query_with_retry(query)
 
+    def fetch_tournament_eligible_videos(self, limit: int = 10000) -> pd.DataFrame:
+        """
+        Fetch tournament-eligible videos (bot_uploaded/AI content, top popularity).
+
+        This function returns a large pool of videos suitable for tournaments,
+        prioritizing bot-uploaded and AI-generated content with high popularity scores.
+        The large pool size enables natural cascade through popularity tiers when
+        recently-used videos are filtered out.
+
+        Algorithm:
+            1. Query global_popular_videos_l7d table
+            2. Filter to is_bot_uploaded = TRUE (bot/AI content only)
+            3. Filter to is_nsfw = FALSE (no NSFW content)
+            4. Order by global_popularity_score DESC (best performers first)
+            5. Return top N videos (default 10000 for large pool)
+
+        Args:
+            limit: Number of videos to fetch (default 10000 for cascade support)
+
+        Returns:
+            DataFrame with columns:
+                - video_id (STRING): The video identifier
+                - global_popularity_score (FLOAT64): Popularity score for ranking
+
+        Example:
+            >>> bq_client = BigQueryClient()
+            >>> df = bq_client.fetch_tournament_eligible_videos(limit=10000)
+            >>> print(len(df))
+            10000
+        """
+        query = f"""
+        SELECT
+            video_id,
+            global_popularity_score
+        FROM `{self.project_id}.{self.dataset}.global_popular_videos_l7d`
+        WHERE is_bot_uploaded = TRUE
+          AND (is_nsfw = FALSE OR is_nsfw IS NULL)
+          AND global_popularity_score IS NOT NULL
+        ORDER BY global_popularity_score DESC
+        LIMIT {limit}
+        """
+
+        logger.info(f"Fetching tournament-eligible videos (pool_size={limit})")
+        return self._execute_query_with_retry(query)
+
     def _execute_query_with_retry(
         self,
         query: str,
