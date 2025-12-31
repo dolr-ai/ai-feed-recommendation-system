@@ -98,6 +98,7 @@ from config import (
     GCHAT_EXCLUDED_STATUS_CODES,
     ADMIN_API_KEY,
     TOURNAMENT_VIDEO_POOL_SIZE,
+    STUBBED_CANISTER_ID,
 )
 
 # Configure logging
@@ -1782,6 +1783,9 @@ async def register_tournament(
         videos_with_metadata = selected_df[
             ["video_id", "canister_id", "post_id", "publisher_user_id"]
         ].to_dict("records")
+
+        for video in videos_with_metadata:
+            video["canister_id"] = STUBBED_CANISTER_ID
 
         result = await redis_layer.store_tournament_videos(tournament_id, videos_with_metadata)
 
