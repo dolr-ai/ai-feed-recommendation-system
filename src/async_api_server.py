@@ -15,6 +15,7 @@ import time
 import logging
 import asyncio
 import random
+import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from contextlib import asynccontextmanager
@@ -43,7 +44,7 @@ sentry_sdk.init(
     ],
 )
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -95,6 +96,9 @@ from config import (
     GCHAT_ERROR_ALERT_LIMIT,
     GCHAT_ERROR_ALERT_WINDOW,
     GCHAT_EXCLUDED_STATUS_CODES,
+    ADMIN_API_KEY,
+    TOURNAMENT_VIDEO_POOL_SIZE,
+    STUBBED_CANISTER_ID,
 )
 
 # Configure logging
@@ -325,6 +329,51 @@ class HealthResponse(BaseModel):
     redis_connected: bool
     scheduler_running: bool
     uptime_seconds: float
+
+
+# ============================================================================
+# Tournament Models
+# ============================================================================
+
+
+class TournamentRegisterRequest(BaseModel):
+    """Request model for registering a new tournament."""
+
+    tournament_id: Optional[str] = Field(default=None, max_length=128, description="Unique tournament identifier. If not provided, server generates UUID.")
+    video_count: int = Field(..., ge=1, le=500, description="Number of videos for this tournament")
+
+
+class TournamentRegisterResponse(BaseModel):
+    """Response model for tournament registration."""
+
+    tournament_id: str
+    video_count: int
+    created_at: str
+
+
+class TournamentVideosResponse(BaseModel):
+    """Response model for tournament videos (without metadata)."""
+
+    tournament_id: str
+    video_count: int
+    videos: List[str]
+
+
+class TournamentVideosWithMetadataResponse(BaseModel):
+    """Response model for tournament videos with metadata."""
+
+    tournament_id: str
+    video_count: int
+    videos: List[VideoMetadata]
+
+
+class TournamentErrorResponse(BaseModel):
+    """Error response model for tournament endpoints."""
+
+    error: str
+    message: str
+    available_count: Optional[int] = None
+    requested_count: Optional[int] = None
 
 
 # ============================================================================
@@ -647,6 +696,39 @@ app.add_middleware(
     allow_methods=CORS_ALLOW_METHODS,
     allow_headers=CORS_ALLOW_HEADERS,
 )
+
+
+# ============================================================================
+# Auth Dependencies
+# ============================================================================
+
+
+async def verify_admin_key(x_admin_key: str = Header(..., description="Admin API key")):
+    """
+    Dependency to verify admin API key for protected endpoints.
+
+    Algorithm:
+        1. Check if ADMIN_API_KEY is configured
+        2. Compare provided key with configured key
+        3. Raise 401 if invalid or missing
+
+    Args:
+        x_admin_key: API key from X-Admin-Key header
+
+    Raises:
+        HTTPException 401 if key is invalid or ADMIN_API_KEY not configured
+    """
+    if not ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "server_misconfigured", "message": "ADMIN_API_KEY not configured"}
+        )
+    if x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "unauthorized", "message": "Invalid or missing admin key"}
+        )
+    return True
 
 
 # ============================================================================
@@ -1569,6 +1651,255 @@ async def debug_user(user_id: str):
 #         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Tournament Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/tournament/register",
+    response_model=TournamentRegisterResponse,
+    responses={
+        401: {"model": TournamentErrorResponse, "description": "Unauthorized"},
+        409: {"model": TournamentErrorResponse, "description": "Tournament already exists"},
+        503: {"model": TournamentErrorResponse, "description": "Insufficient videos available"},
+    },
+)
+async def register_tournament(
+    request: TournamentRegisterRequest,
+    _: bool = Depends(verify_admin_key),
+):
+    """
+    Register a new tournament and generate its video set (Admin Only).
+
+    This endpoint creates a tournament with a set of top-performing bot_uploaded/AI
+    videos. Videos are selected from BigQuery based on popularity score, excluding
+    recently-used tournament videos to prevent overlap.
+
+    Algorithm:
+        1. Check if tournament already exists (return 409 if so)
+        2. Fetch tournament-eligible videos from BigQuery
+        3. Filter out recently-used videos (7-day cooldown)
+        4. If not enough, allow partial overlap with oldest used videos
+        5. Store video set in Redis with 3-day TTL
+        6. Track videos as recently-used for future overlap prevention
+
+    Args:
+        request: TournamentRegisterRequest with tournament_id and video_count
+        _: Admin key verification (via Depends)
+
+    Returns:
+        TournamentRegisterResponse with tournament_id, video_count, created_at
+
+    Raises:
+        HTTPException 401: Invalid or missing admin key
+        HTTPException 409: Tournament already exists
+        HTTPException 503: Insufficient videos available
+    """
+    import uuid
+    from utils.bigquery_client import BigQueryClient
+
+    video_count = request.video_count
+
+    # Generate tournament_id if not provided, otherwise use client's ID
+    if request.tournament_id:
+        tournament_id = request.tournament_id
+        # Only check for duplicates when client provides ID
+        try:
+            if await redis_layer.tournament_exists(tournament_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "tournament_exists",
+                        "message": f"Tournament {tournament_id} already exists"
+                    }
+                )
+        except HTTPException:
+            raise
+    else:
+        # Server-generated UUID - guaranteed unique, no duplicate check needed
+        tournament_id = str(uuid.uuid4())
+
+    try:
+        # Fetch large pool of tournament-eligible videos WITH metadata from BigQuery
+        # Using 10000 pool enables natural cascade through popularity tiers
+        bq_client = BigQueryClient()
+        candidates_df = bq_client.fetch_tournament_eligible_videos(
+            limit=TOURNAMENT_VIDEO_POOL_SIZE
+        )
+
+        if candidates_df.empty:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "insufficient_videos",
+                    "message": "No tournament-eligible videos found in BigQuery",
+                    "available_count": 0,
+                    "requested_count": video_count
+                }
+            )
+
+        # Get recently-used tournament videos (within 7-day cooldown window)
+        recently_used = await redis_layer.get_recently_used_tournament_videos()
+
+        # Keep original DataFrame for fallback before filtering
+        original_candidates_df = candidates_df.copy()
+
+        # Filter out recently-used videos using pandas for efficiency
+        # Videos are already ordered by popularity score (DESC) from BigQuery
+        fresh_df = candidates_df[~candidates_df["video_id"].isin(recently_used)]
+
+        # Take top N from filtered results (natural cascade through popularity)
+        selected_df = fresh_df.head(video_count)
+
+        # If not enough fresh videos after filtering all 10000, allow partial overlap
+        if len(selected_df) < video_count:
+            needed = video_count - len(selected_df)
+
+            # Use cached original DataFrame to get recently-used videos (ordered by popularity)
+            overlapping_df = original_candidates_df[
+                original_candidates_df["video_id"].isin(recently_used)
+            ].head(needed)
+
+            # Combine fresh and overlapping DataFrames
+            selected_df = pd.concat([selected_df, overlapping_df], ignore_index=True)
+
+            logger.warning(
+                f"Tournament {tournament_id}: Using {len(overlapping_df)} overlapping videos "
+                f"due to insufficient fresh videos in pool of {TOURNAMENT_VIDEO_POOL_SIZE}"
+            )
+
+        if len(selected_df) < video_count:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "insufficient_videos",
+                    "message": f"Only {len(selected_df)} eligible videos available, need {video_count}",
+                    "available_count": len(selected_df),
+                    "requested_count": video_count
+                }
+            )
+
+        videos_with_metadata = selected_df[
+            ["video_id", "canister_id", "post_id", "publisher_user_id"]
+        ].to_dict("records")
+
+        for video in videos_with_metadata:
+            video["canister_id"] = STUBBED_CANISTER_ID
+
+        result = await redis_layer.store_tournament_videos(tournament_id, videos_with_metadata)
+
+        logger.info(
+            f"Tournament {tournament_id} registered with {len(videos_with_metadata)} videos (with metadata)"
+        )
+
+        return TournamentRegisterResponse(
+            tournament_id=tournament_id,
+            video_count=len(videos_with_metadata),
+            created_at=result["created_at"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering tournament {tournament_id}: {e}")
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": str(e)}
+        )
+
+
+@app.get(
+    "/tournament/{tournament_id}/videos",
+    responses={
+        200: {"description": "Tournament videos returned successfully"},
+        404: {"model": TournamentErrorResponse, "description": "Tournament not found"},
+    },
+)
+async def get_tournament_videos(
+    tournament_id: str,
+    with_metadata: bool = Query(default=False, description="Include canister_id, post_id, publisher_user_id"),
+):
+    """
+    Get the video set for a tournament.
+
+    This endpoint returns the pre-generated video set for a tournament.
+    Videos are returned in the order they were selected (by popularity score).
+    Metadata is pre-stored 
+
+    Algorithm:
+        1. Fetch videos from Redis (with or without metadata)
+        2. If not found, return 404
+        3. Return video list
+
+    Args:
+        tournament_id: Tournament identifier
+        with_metadata: Include video metadata (canister_id, post_id, publisher_user_id)
+
+    Returns:
+        TournamentVideosResponse or TournamentVideosWithMetadataResponse
+
+    Raises:
+        HTTPException 404: Tournament not found
+    """
+    try:
+        if with_metadata:
+            # Fetch videos with full metadata from Redis (pre-stored at registration)
+            videos_data = await redis_layer.get_tournament_videos(tournament_id, with_metadata=True)
+
+            if videos_data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "tournament_not_found",
+                        "message": f"Tournament {tournament_id} does not exist"
+                    }
+                )
+
+            return TournamentVideosWithMetadataResponse(
+                tournament_id=tournament_id,
+                video_count=len(videos_data),
+                videos=[
+                    VideoMetadata(
+                        video_id=str(v["video_id"]),
+                        canister_id=str(v["canister_id"]),
+                        post_id=str(v["post_id"]),
+                        publisher_user_id=str(v["publisher_user_id"])
+                    )
+                    for v in videos_data
+                ]
+            )
+        else:
+            # Fetch just video IDs from Redis
+            video_ids = await redis_layer.get_tournament_videos(tournament_id, with_metadata=False)
+
+            if video_ids is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "tournament_not_found",
+                        "message": f"Tournament {tournament_id} does not exist"
+                    }
+                )
+
+            return TournamentVideosResponse(
+                tournament_id=tournament_id,
+                video_count=len(video_ids),
+                videos=video_ids
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching tournament {tournament_id} videos: {e}")
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": str(e)}
+        )
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -1582,6 +1913,8 @@ async def root():
             "/v2/recommend-with-metadata/{user_id}",
             "/global-cache",
             "/feedback/{user_id}",
+            "/tournament/register",
+            "/tournament/{tournament_id}/videos",
             "/health",
             "/status",
             "/metrics",

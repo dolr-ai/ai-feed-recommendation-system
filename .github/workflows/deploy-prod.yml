@@ -67,6 +67,7 @@ jobs:
             METADATA_REDIS_AUTHKEY="$METADATA_REDIS_AUTHKEY" \
             SENTRY_DSN="$SENTRY_DSN" \
             GCHAT_WEBHOOK_URL="$GCHAT_WEBHOOK_URL" \
+            ADMIN_API_KEY="$ADMIN_API_KEY" \
             --app recsys-on-premise
           flyctl secrets set SERVICE_CRED="$SERVICE_CRED" --app recsys-on-premise
         env:
@@ -80,6 +81,7 @@ jobs:
           METADATA_REDIS_AUTHKEY: ${{ secrets.METADATA_REDIS_AUTHKEY }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
 
       - name: Deploy to Fly.io
         run: flyctl deploy --config fly_prod.toml --remote-only

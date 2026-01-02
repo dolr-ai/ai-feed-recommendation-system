@@ -65,6 +65,7 @@ jobs:
             METADATA_REDIS_HOST="$METADATA_REDIS_HOST" \
             METADATA_REDIS_PORT="$METADATA_REDIS_PORT" \
             METADATA_REDIS_AUTHKEY="$METADATA_REDIS_AUTHKEY" \
+            ADMIN_API_KEY="$ADMIN_API_KEY" \
             --app stage-recsys-on-premise
           flyctl secrets set SERVICE_CRED="$SERVICE_CRED" --app stage-recsys-on-premise
         env:
@@ -76,6 +77,7 @@ jobs:
           METADATA_REDIS_HOST: ${{ secrets.METADATA_REDIS_HOST }}
           METADATA_REDIS_PORT: ${{ secrets.METADATA_REDIS_PORT }}
           METADATA_REDIS_AUTHKEY: ${{ secrets.METADATA_REDIS_AUTHKEY }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
 
       - name: Deploy to Fly.io
         run: flyctl deploy --config fly_stage.toml --remote-only
