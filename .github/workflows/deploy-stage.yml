@@ -33,11 +33,11 @@ jobs:
 
       - name: Run tests
         env:
-          STAGE_DRAGONFLY_HOST: ${{ secrets.STAGE_DRAGONFLY_HOST }}
-          STAGE_DRAGONFLY_PORT: ${{ secrets.STAGE_DRAGONFLY_PORT }}
-          STAGE_DRAGONFLY_PASSWORD: ${{ secrets.STAGE_DRAGONFLY_PASSWORD }}
-          STAGE_DRAGONFLY_TLS_ENABLED: "false"
-          STAGE_DRAGONFLY_CLUSTER_ENABLED: "false"
+          TEST_DRAGONFLY_HOST: ${{ secrets.TEST_DRAGONFLY_HOST }}
+          TEST_DRAGONFLY_PORT: ${{ secrets.TEST_DRAGONFLY_PORT }}
+          TEST_DRAGONFLY_PASSWORD: ${{ secrets.TEST_DRAGONFLY_PASSWORD }}
+          TEST_DRAGONFLY_TLS_ENABLED: "false"
+          TEST_DRAGONFLY_CLUSTER_ENABLED: "false"
         run: |
           pytest tests/ -v --tb=short
 
@@ -57,27 +57,28 @@ jobs:
       - name: Set Fly secrets
         run: |
           flyctl secrets set \
-            DRAGONFLY_HOST="$DRAGONFLY_HOST" \
-            DRAGONFLY_PORT="$DRAGONFLY_PORT" \
-            DRAGONFLY_PASSWORD="$DRAGONFLY_PASSWORD" \
-            DRAGONFLY_CLUSTER_ENABLED="false" \
-            DRAGONFLY_TLS_ENABLED="false" \
-            METADATA_REDIS_HOST="$METADATA_REDIS_HOST" \
-            METADATA_REDIS_PORT="$METADATA_REDIS_PORT" \
-            METADATA_REDIS_AUTHKEY="$METADATA_REDIS_AUTHKEY" \
+            KVROCKS_HOST="$KVROCKS_HOST" \
+            KVROCKS_PORT="$KVROCKS_PORT" \
+            KVROCKS_PASSWORD="$KVROCKS_PASSWORD" \
+            KVROCKS_CLUSTER_ENABLED="true" \
+            KVROCKS_TLS_ENABLED="true" \
             ADMIN_API_KEY="$ADMIN_API_KEY" \
+            ENV="stage" \
             --app stage-recsys-on-premise
           flyctl secrets set SERVICE_CRED="$SERVICE_CRED" --app stage-recsys-on-premise
+          flyctl secrets set KVROCKS_SSL_CA_CERT="$KVROCKS_SSL_CA_CERT" --app stage-recsys-on-premise
+          flyctl secrets set KVROCKS_SSL_CLIENT_CERT="$KVROCKS_SSL_CLIENT_CERT" --app stage-recsys-on-premise
+          flyctl secrets set KVROCKS_SSL_CLIENT_KEY="$KVROCKS_SSL_CLIENT_KEY" --app stage-recsys-on-premise
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_STAGE_DEPLOY_TOKEN }}
-          DRAGONFLY_HOST: ${{ secrets.STAGE_DRAGONFLY_HOST }}
-          DRAGONFLY_PORT: ${{ secrets.STAGE_DRAGONFLY_PORT }}
-          DRAGONFLY_PASSWORD: ${{ secrets.STAGE_DRAGONFLY_PASSWORD }}
+          KVROCKS_HOST: ${{ secrets.PROD_KVROCKS_HOST }}
+          KVROCKS_PORT: ${{ secrets.PROD_KVROCKS_PORT }}
+          KVROCKS_PASSWORD: ${{ secrets.PROD_KVROCKS_PASSWORD }}
           SERVICE_CRED: ${{ secrets.SERVICE_CRED }}
-          METADATA_REDIS_HOST: ${{ secrets.METADATA_REDIS_HOST }}
-          METADATA_REDIS_PORT: ${{ secrets.METADATA_REDIS_PORT }}
-          METADATA_REDIS_AUTHKEY: ${{ secrets.METADATA_REDIS_AUTHKEY }}
           ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          KVROCKS_SSL_CA_CERT: ${{ secrets.KVROCKS_SSL_CA_CERT }}
+          KVROCKS_SSL_CLIENT_CERT: ${{ secrets.KVROCKS_SSL_CLIENT_CERT }}
+          KVROCKS_SSL_CLIENT_KEY: ${{ secrets.KVROCKS_SSL_CLIENT_KEY }}
 
       - name: Deploy to Fly.io
         run: flyctl deploy --config fly_stage.toml --remote-only

@@ -33,7 +33,7 @@ import json
 import logging
 import asyncio
 from typing import List, Dict, Tuple, Optional, Any, Union
-from utils.async_redis_utils import AsyncDragonflyService
+from utils.async_redis_utils import AsyncKVRocksService
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +121,6 @@ class AsyncLuaScripts:
         self.filter_and_add_videos = None
         self.count_valid_videos = None
         self.check_videos_not_watched = None
-        self.refill_from_popularity_buckets = None
-        self.refill_from_freshness_cascade = None
-        self.refill_from_single_source = None
 
     async def initialize(self):
         """
@@ -131,14 +128,12 @@ class AsyncLuaScripts:
         Must be called after creating the AsyncLuaScripts instance.
         """
         # Register all scripts (async)
+        # Note: refill scripts removed - cluster-safe refills now use Python + filter_and_add_videos
         self.fetch_and_consume = self._register_fetch_and_consume()
         self.add_videos_with_ttl = self._register_add_videos_with_ttl()
         self.filter_and_add_videos = self._register_filter_and_add_videos()
         self.count_valid_videos = self._register_count_valid_videos()
         self.check_videos_not_watched = self._register_check_videos_not_watched()
-        self.refill_from_popularity_buckets = self._register_refill_from_popularity_buckets()
-        self.refill_from_freshness_cascade = self._register_refill_from_freshness_cascade()
-        self.refill_from_single_source = self._register_refill_from_single_source()
 
         logger.info(
             f"Async Lua scripts registered successfully (logging={'ON' if self.enable_logging else 'OFF'})"
@@ -497,492 +492,8 @@ class AsyncLuaScripts:
         """
         return self.client.register_script(script)
 
-    def _register_refill_from_popularity_buckets(self):
-        """
-        Refill a user's to_show zset from popularity buckets with internal downshift logic.
-        EXACT SAME LUA SCRIPT AS SYNC VERSION - NO BUSINESS LOGIC CHANGE.
-
-        KEYS[1]: to_show_key (ZSET)
-        KEYS[2]: watched_key (ZSET)
-        KEYS[3]: bloom_key (BF)
-        KEYS[4]: pointer_key (STRING) - stores current bucket pointer
-        KEYS[5-15]: Global popularity bucket keys in order (pop_99_100, pop_90_99, ..., pop_0_10) - 11 ZSETs
-        ARGV[1]: now (int)
-        ARGV[2]: ttl_seconds (int)
-        ARGV[3]: target_count (int)
-        ARGV[4]: batch_size (int)
-        ARGV[5]: max_iterations_per_bucket (int) - try each bucket this many times before downshifting
-        ARGV[6]: max_capacity (int) - maximum pool size to cap at after refill
-
-        Returns: {added_total, iterations_total, filtered_watched, filtered_bloom, valid_after, bucket_start, bucket_final, sources_exhausted}
-        Algorithm (UNCHANGED):
-        - Bucket order in Lua: ["99_100", "90_99", ..., "0_10"] mapped to KEYS[5-15]
-        - Read current bucket from pointer_key
-        - For each bucket starting from current:
-          - Try for exactly max_iterations_per_bucket (10) iterations
-          - If target met during iterations, update pointer and return success
-          - If 10 iterations done and target not met = "10 errors" → downshift to next bucket
-        - Update pointer to final bucket used
-        - Return stats with exhaustion flag if all buckets tried
-        """
-        script = """
-        local to_show_key = KEYS[1]
-        local watched_key = KEYS[2]
-        local bloom_key = KEYS[3]
-        local pointer_key = KEYS[4]
-        -- KEYS[5-15]: Global popularity bucket keys (99_100 down to 0_10)
-        local now = tonumber(ARGV[1])
-        local ttl = tonumber(ARGV[2])
-        local target = tonumber(ARGV[3])
-        local batch_size = tonumber(ARGV[4])
-        local max_iters_per_bucket = tonumber(ARGV[5])
-        local max_capacity = tonumber(ARGV[6])
-
-        -- Helper function to cap pool size at max_capacity (keeps newest by expiry score)
-        local function cap_pool_size(pool_key, capacity)
-            if capacity and capacity > 0 then
-                local current_size = redis.call('ZCARD', pool_key)
-                if current_size > capacity then
-                    redis.call('ZREMRANGEBYRANK', pool_key, 0, current_size - capacity - 1)
-                end
-            end
-        end
-
-        -- Hardcoded bucket order (from highest to lowest popularity)
-        local buckets = {"99_100", "90_99", "80_90", "70_80", "60_70", "50_60", "40_50", "30_40", "20_30", "10_20", "0_10"}
-
-        -- Map bucket names to KEYS indices (KEYS[5] = 99_100, KEYS[6] = 90_99, ..., KEYS[15] = 0_10)
-        local bucket_to_key_idx = {
-            ["99_100"] = 5, ["90_99"] = 6, ["80_90"] = 7, ["70_80"] = 8, ["60_70"] = 9,
-            ["50_60"] = 10, ["40_50"] = 11, ["30_40"] = 12, ["20_30"] = 13, ["10_20"] = 14, ["0_10"] = 15
-        }
-
-        -- Read current bucket pointer from Redis
-        local current_bucket = redis.call('GET', pointer_key)
-        if not current_bucket then
-            current_bucket = "99_100"  -- Default to highest bucket
-        end
-
-        -- Find starting index in bucket list
-        local start_idx = 1
-        for i, bucket in ipairs(buckets) do
-            if bucket == current_bucket then
-                start_idx = i
-                break
-            end
-        end
-
-        -- Helper function to count unwatched videos with valid TTL
-        local function count_unwatched_valid(to_show, watched, bloom, min_time)
-            local candidates = redis.call('ZRANGEBYSCORE', to_show, min_time, '+inf')
-            local unwatched_count = 0
-            for _, vid in ipairs(candidates) do
-                local in_watched = redis.call('ZSCORE', watched, vid)
-                if not in_watched then
-                    local in_bloom = redis.call('BF.EXISTS', bloom, vid)
-                    if in_bloom == 0 then
-                        unwatched_count = unwatched_count + 1
-                    end
-                end
-            end
-            return unwatched_count
-        end
-
-        -- Housekeeping: cleanup to_show and watched once
-        redis.call('ZREMRANGEBYSCORE', to_show_key, '-inf', now)
-        redis.call('ZREMRANGEBYSCORE', watched_key, '-inf', now)
-
-        local added_total = 0
-        local filtered_watched = 0
-        local filtered_bloom = 0
-        local iterations_total = 0
-        local valid_count = 0
-        local seen_videos = {}  -- Track videos added in this execution to avoid counting duplicates
-        local expiry_time = now + ttl
-        local min_ok = now + (ttl * 0.01)
-        local bucket_start = current_bucket
-        local bucket_final = current_bucket
-        local sources_exhausted = 1  -- Assume exhausted unless we meet target
-
-        -- Cascade through buckets starting from current pointer
-        for bucket_idx = start_idx, #buckets do
-            local bucket = buckets[bucket_idx]
-            local source_key = KEYS[bucket_to_key_idx[bucket]]
-
-            -- Cleanup expired from this bucket
-            redis.call('ZREMRANGEBYSCORE', source_key, '-inf', now)
-
-            -- Try this bucket for exactly max_iters_per_bucket iterations (10 errors = downshift)
-            for i = 1, max_iters_per_bucket do
-                iterations_total = iterations_total + 1
-
-                -- Random sampling from ZSET
-                local candidates_with_scores = redis.call('ZRANDMEMBER', source_key, batch_size, 'WITHSCORES')
-
-                -- Parse and filter expired videos
-                local candidates = {}
-                if candidates_with_scores and #candidates_with_scores > 0 then
-                    for j = 1, #candidates_with_scores, 2 do
-                        local vid = candidates_with_scores[j]
-                        local score = tonumber(candidates_with_scores[j + 1])
-                        if score and score > now then
-                            table.insert(candidates, vid)
-                        end
-                    end
-                end
-
-                -- If no candidates, bucket is empty, break to next bucket immediately
-                if (not candidates) or (#candidates == 0) then
-                    break
-                end
-
-                -- Filter and add videos
-                for _, vid in ipairs(candidates) do
-                    local in_watched = redis.call('ZSCORE', watched_key, vid)
-                    if not in_watched then
-                        local in_bloom = redis.call('BF.EXISTS', bloom_key, vid)
-                        if in_bloom == 0 then
-                            -- Not watched - add to to_show (ZADD is idempotent, updates score if exists)
-                            redis.call('ZADD', to_show_key, expiry_time, vid)
-                            -- Only count as new if we haven't seen it in this execution
-                            if not seen_videos[vid] then
-                                added_total = added_total + 1
-                                valid_count = valid_count + 1
-                                seen_videos[vid] = true
-                            end
-                        else
-                            -- In bloom filter - remove from to_show_key if exists (cleanup)
-                            redis.call('ZREM', to_show_key, vid)
-                            filtered_bloom = filtered_bloom + 1
-                        end
-                    else
-                        -- In cooldown set - remove from to_show_key if exists (cleanup)
-                        redis.call('ZREM', to_show_key, vid)
-                        filtered_watched = filtered_watched + 1
-                    end
-                end
-
-                -- Check if target met using incremental count (O(1) instead of O(N))
-                if valid_count >= target then
-                    bucket_final = bucket
-                    sources_exhausted = 0
-                    -- Update pointer to successful bucket
-                    redis.call('SET', pointer_key, bucket_final)
-                    -- Cap pool size before returning
-                    cap_pool_size(to_show_key, max_capacity)
-                    local valid_after = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-                    return {added_total, iterations_total, filtered_watched, filtered_bloom, valid_after, bucket_start, bucket_final, sources_exhausted}
-                end
-            end
-
-            -- 10 iterations done, target not met = "10 errors"
-            -- Downshift to next bucket (continue loop)
-            bucket_final = bucket
-        end
-
-        -- All buckets exhausted, update pointer to last bucket tried
-        redis.call('SET', pointer_key, bucket_final)
-
-        -- Cap pool size before returning
-        cap_pool_size(to_show_key, max_capacity)
-        local valid_final = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-        return {added_total, iterations_total, filtered_watched, filtered_bloom, valid_final, bucket_start, bucket_final, sources_exhausted}
-        """
-        return self.client.register_script(script)
-
-    def _register_refill_from_freshness_cascade(self):
-        """
-        Refill a user's to_show zset from freshness windows with internal cascade logic.
-        EXACT SAME LUA SCRIPT AS SYNC VERSION - NO BUSINESS LOGIC CHANGE.
-
-        KEYS[1]: to_show_key (ZSET)
-        KEYS[2]: watched_key (ZSET)
-        KEYS[3]: bloom_key (BF)
-        KEYS[4-8]: Global freshness window keys in order (fresh_l1d, fresh_l7d, fresh_l14d, fresh_l30d, fresh_l90d) - 5 ZSETs
-        ARGV[1]: now (int)
-        ARGV[2]: ttl_seconds (int)
-        ARGV[3]: target_count (int)
-        ARGV[4]: batch_size (int)
-        ARGV[5]: max_iterations_per_window (int) - try each window this many times before cascading
-        ARGV[6]: max_capacity (int) - maximum pool size to cap at after refill
-
-        Returns: {added_total, iterations_total, filtered_watched, filtered_bloom, valid_after, sources_exhausted}
-        Algorithm (UNCHANGED):
-        - Window order in Lua: ["l1d", "l7d", "l14d", "l30d", "l90d"] mapped to KEYS[4-8]
-        - For each window in order:
-          - Try for exactly max_iterations_per_window iterations
-          - If target met during iterations, return success
-          - If iterations done and target not met → cascade to next window
-        - Return stats with exhaustion flag if all windows tried
-        """
-        script = """
-        local to_show_key = KEYS[1]
-        local watched_key = KEYS[2]
-        local bloom_key = KEYS[3]
-        -- KEYS[4-8]: Global freshness window keys (fresh_l1d, fresh_l7d, fresh_l14d, fresh_l30d, fresh_l90d)
-        local now = tonumber(ARGV[1])
-        local ttl = tonumber(ARGV[2])
-        local target = tonumber(ARGV[3])
-        local batch_size = tonumber(ARGV[4])
-        local max_iters_per_window = tonumber(ARGV[5])
-        local max_capacity = tonumber(ARGV[6])
-
-        -- Helper function to cap pool size at max_capacity (keeps newest by expiry score)
-        local function cap_pool_size(pool_key, capacity)
-            if capacity and capacity > 0 then
-                local current_size = redis.call('ZCARD', pool_key)
-                if current_size > capacity then
-                    redis.call('ZREMRANGEBYRANK', pool_key, 0, current_size - capacity - 1)
-                end
-            end
-        end
-
-        -- Hardcoded freshness window order (from freshest to oldest)
-        local windows = {"l1d", "l7d", "l14d", "l30d", "l90d"}
-
-        -- Map window names to KEYS indices (KEYS[4] = l1d, KEYS[5] = l7d, ..., KEYS[8] = l90d)
-        local window_to_key_idx = {
-            ["l1d"] = 4, ["l7d"] = 5, ["l14d"] = 6, ["l30d"] = 7, ["l90d"] = 8
-        }
-
-        -- Helper function to count unwatched videos with valid TTL
-        local function count_unwatched_valid(to_show, watched, bloom, min_time)
-            local candidates = redis.call('ZRANGEBYSCORE', to_show, min_time, '+inf')
-            local unwatched_count = 0
-            for _, vid in ipairs(candidates) do
-                local in_watched = redis.call('ZSCORE', watched, vid)
-                if not in_watched then
-                    local in_bloom = redis.call('BF.EXISTS', bloom, vid)
-                    if in_bloom == 0 then
-                        unwatched_count = unwatched_count + 1
-                    end
-                end
-            end
-            return unwatched_count
-        end
-
-        -- Housekeeping: cleanup to_show and watched once
-        redis.call('ZREMRANGEBYSCORE', to_show_key, '-inf', now)
-        redis.call('ZREMRANGEBYSCORE', watched_key, '-inf', now)
-
-        local added_total = 0
-        local filtered_watched = 0
-        local filtered_bloom = 0
-        local iterations_total = 0
-        local valid_count = 0
-        local seen_videos = {}  -- Track videos added in this execution to avoid counting duplicates
-        local expiry_time = now + ttl
-        local min_ok = now + (ttl * 0.01)
-        local sources_exhausted = 1  -- Assume exhausted unless we meet target
-
-        -- Cascade through freshness windows
-        for _, window in ipairs(windows) do
-            local source_key = KEYS[window_to_key_idx[window]]
-
-            -- Cleanup expired from this window
-            redis.call('ZREMRANGEBYSCORE', source_key, '-inf', now)
-
-            -- Try this window for max_iters_per_window iterations
-            for i = 1, max_iters_per_window do
-                iterations_total = iterations_total + 1
-
-                -- Random sampling from ZSET
-                local candidates_with_scores = redis.call('ZRANDMEMBER', source_key, batch_size, 'WITHSCORES')
-
-                -- Parse and filter expired videos
-                local candidates = {}
-                if candidates_with_scores and #candidates_with_scores > 0 then
-                    for j = 1, #candidates_with_scores, 2 do
-                        local vid = candidates_with_scores[j]
-                        local score = tonumber(candidates_with_scores[j + 1])
-                        if score and score > now then
-                            table.insert(candidates, vid)
-                        end
-                    end
-                end
-
-                -- If no candidates, window is empty, break to next window immediately
-                if (not candidates) or (#candidates == 0) then
-                    break
-                end
-
-                -- Filter and add videos
-                for _, vid in ipairs(candidates) do
-                    local in_watched = redis.call('ZSCORE', watched_key, vid)
-                    if not in_watched then
-                        local in_bloom = redis.call('BF.EXISTS', bloom_key, vid)
-                        if in_bloom == 0 then
-                            -- Not watched - add to to_show (ZADD is idempotent, updates score if exists)
-                            redis.call('ZADD', to_show_key, expiry_time, vid)
-                            -- Only count as new if we haven't seen it in this execution
-                            if not seen_videos[vid] then
-                                added_total = added_total + 1
-                                valid_count = valid_count + 1
-                                seen_videos[vid] = true
-                            end
-                        else
-                            -- In bloom filter - remove from to_show_key if exists (cleanup)
-                            redis.call('ZREM', to_show_key, vid)
-                            filtered_bloom = filtered_bloom + 1
-                        end
-                    else
-                        -- In cooldown set - remove from to_show_key if exists (cleanup)
-                        redis.call('ZREM', to_show_key, vid)
-                        filtered_watched = filtered_watched + 1
-                    end
-                end
-
-                -- Check if target met using incremental count (O(1) instead of O(N))
-                if valid_count >= target then
-                    sources_exhausted = 0
-                    -- Cap pool size before returning
-                    cap_pool_size(to_show_key, max_capacity)
-                    local valid_after = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-                    return {added_total, iterations_total, filtered_watched, filtered_bloom, valid_after, sources_exhausted}
-                end
-            end
-
-            -- Max iterations done for this window, cascade to next
-        end
-
-        -- All windows exhausted
-        -- Cap pool size before returning
-        cap_pool_size(to_show_key, max_capacity)
-        local valid_final = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-        return {added_total, iterations_total, filtered_watched, filtered_bloom, valid_final, sources_exhausted}
-        """
-        return self.client.register_script(script)
-
-    def _register_refill_from_single_source(self):
-        """
-        Refill from a single global ZSET source (for fallback pool).
-        EXACT SAME LUA SCRIPT AS SYNC VERSION - NO BUSINESS LOGIC CHANGE.
-
-        KEYS[1]: to_show_key (ZSET)
-        KEYS[2]: watched_key (ZSET)
-        KEYS[3]: bloom_key (BF)
-        KEYS[4]: source_key (ZSET)
-        ARGV[1]: now (int)
-        ARGV[2]: ttl_seconds (int)
-        ARGV[3]: target_count (int)
-        ARGV[4]: batch_size (int)
-        ARGV[5]: max_iterations (int)
-        ARGV[6]: max_capacity (int) - maximum pool size to cap at after refill
-
-        Returns: {added_total, iterations, filtered_watched, filtered_bloom, valid_after, sources_exhausted}
-        """
-        script = """
-        local to_show_key = KEYS[1]
-        local watched_key = KEYS[2]
-        local bloom_key = KEYS[3]
-        local source_key = KEYS[4]
-        local now = tonumber(ARGV[1])
-        local ttl = tonumber(ARGV[2])
-        local target = tonumber(ARGV[3])
-        local batch_size = tonumber(ARGV[4])
-        local max_iters = tonumber(ARGV[5])
-        local max_capacity = tonumber(ARGV[6])
-
-        -- Helper function to cap pool size at max_capacity (keeps newest by expiry score)
-        local function cap_pool_size(pool_key, capacity)
-            if capacity and capacity > 0 then
-                local current_size = redis.call('ZCARD', pool_key)
-                if current_size > capacity then
-                    redis.call('ZREMRANGEBYRANK', pool_key, 0, current_size - capacity - 1)
-                end
-            end
-        end
-
-        -- Helper function to count unwatched videos with valid TTL
-        local function count_unwatched_valid(to_show, watched, bloom, min_time)
-            local candidates = redis.call('ZRANGEBYSCORE', to_show, min_time, '+inf')
-            local unwatched_count = 0
-            for _, vid in ipairs(candidates) do
-                local in_watched = redis.call('ZSCORE', watched, vid)
-                if not in_watched then
-                    local in_bloom = redis.call('BF.EXISTS', bloom, vid)
-                    if in_bloom == 0 then
-                        unwatched_count = unwatched_count + 1
-                    end
-                end
-            end
-            return unwatched_count
-        end
-
-        -- Housekeeping
-        redis.call('ZREMRANGEBYSCORE', source_key, '-inf', now)
-        redis.call('ZREMRANGEBYSCORE', to_show_key, '-inf', now)
-        redis.call('ZREMRANGEBYSCORE', watched_key, '-inf', now)
-
-        local added_total = 0
-        local filtered_watched = 0
-        local filtered_bloom = 0
-        local iterations = 0
-        local valid_count = 0
-        local seen_videos = {}  -- Track videos added in this execution to avoid counting duplicates
-        local expiry_time = now + ttl
-        local min_ok = now + (ttl * 0.01)
-
-        for i = 1, max_iters do
-            iterations = iterations + 1
-
-            local candidates_with_scores = redis.call('ZRANDMEMBER', source_key, batch_size, 'WITHSCORES')
-
-            local candidates = {}
-            if candidates_with_scores and #candidates_with_scores > 0 then
-                for j = 1, #candidates_with_scores, 2 do
-                    local vid = candidates_with_scores[j]
-                    local score = tonumber(candidates_with_scores[j + 1])
-                    if score and score > now then
-                        table.insert(candidates, vid)
-                    end
-                end
-            end
-
-            if (not candidates) or (#candidates == 0) then
-                break
-            end
-
-            for _, vid in ipairs(candidates) do
-                local in_watched = redis.call('ZSCORE', watched_key, vid)
-                if not in_watched then
-                    local in_bloom = redis.call('BF.EXISTS', bloom_key, vid)
-                    if in_bloom == 0 then
-                        -- Not watched - add to to_show (ZADD is idempotent, updates score if exists)
-                        redis.call('ZADD', to_show_key, expiry_time, vid)
-                        -- Only count as new if we haven't seen it in this execution
-                        if not seen_videos[vid] then
-                            added_total = added_total + 1
-                            valid_count = valid_count + 1
-                            seen_videos[vid] = true
-                        end
-                    else
-                        -- In bloom filter - remove from to_show_key if exists (cleanup)
-                        redis.call('ZREM', to_show_key, vid)
-                        filtered_bloom = filtered_bloom + 1
-                    end
-                else
-                    -- In cooldown set - remove from to_show_key if exists (cleanup)
-                    redis.call('ZREM', to_show_key, vid)
-                    filtered_watched = filtered_watched + 1
-                end
-            end
-
-            -- Check if target met using incremental count (O(1) instead of O(N))
-            if valid_count >= target then
-                -- Cap pool size before returning
-                cap_pool_size(to_show_key, max_capacity)
-                local valid_after = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-                return {added_total, iterations, filtered_watched, filtered_bloom, valid_after, 0}
-            end
-        end
-
-        -- Cap pool size before returning
-        cap_pool_size(to_show_key, max_capacity)
-        local valid_final = count_unwatched_valid(to_show_key, watched_key, bloom_key, min_ok)
-        return {added_total, iterations, filtered_watched, filtered_bloom, valid_final, 1}
-        """
-        return self.client.register_script(script)
+    # REMOVED register_refill_from_popularity_buckets(), register_refill_from_freshness_cascade(), register_refill_from_single_source()
+    # Due to CROSSSLOT errors, and incompatibility with KVROCKS. This piece is migrated to Python service that does the refill in cluster-safe manner.
 
 
 # ============================================================================
@@ -1001,17 +512,17 @@ class AsyncRedisLayer:
 
     def __init__(
         self,
-        dragonfly_service: AsyncDragonflyService,
+        kvrocks_service: AsyncKVRocksService,
         enable_lua_logging: bool = ENABLE_LUA_SCRIPT_LOGGING,
     ):
         """
-        Initialize async Redis layer with Dragonfly service.
+        Initialize async Redis layer with KVRocks service.
 
         Args:
-            dragonfly_service: AsyncDragonflyService instance
+            kvrocks_service: AsyncKVRocksService instance
             enable_lua_logging: Enable detailed logging for Lua script execution
         """
-        self.db = dragonfly_service
+        self.db = kvrocks_service
         self.client = None  # Will be set in async initialize
         self.scripts = None  # Will be set in async initialize
         self.enable_lua_logging = enable_lua_logging
@@ -1037,49 +548,49 @@ class AsyncRedisLayer:
     def _key_videos_to_show(self, user_id: str, rec_type: str = "default") -> str:
         """
         Generate key for user's videos_to_show sorted set.
-        SAME AS SYNC VERSION - no change needed.
+        Uses hash tag {user:ID} for cluster-safe operations.
 
         Args:
             user_id: User ID
             rec_type: Recommendation type (e.g., 'popularity', 'freshness', 'fallback')
         """
-        return f"user:{user_id}:videos_to_show:{rec_type}"
+        return f"{{user:{user_id}}}:videos_to_show:{rec_type}"
 
     def _key_watched_short_lived(self, user_id: str) -> str:
-        """Generate key for user's short-lived watched set. SAME AS SYNC."""
-        return f"user:{user_id}:watched:short"
+        """Generate key for user's short-lived watched set. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:watched:short"
 
     def _key_bloom_permanent(self, user_id: str) -> str:
-        """Generate key for user's permanent bloom filter. SAME AS SYNC."""
-        return f"user:{user_id}:bloom:permanent"
+        """Generate key for user's permanent bloom filter. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:bloom:permanent"
 
     def _key_global_pop_set(self, bucket: str) -> str:
-        """Generate key for global popularity SET bucket. SAME AS SYNC."""
-        return f"user:GLOBAL:pool:pop_{bucket}"
+        """Generate key for global popularity SET bucket. Uses {GLOBAL} hash tag for cluster."""
+        return f"{{GLOBAL}}:pool:pop_{bucket}"
 
     def _key_global_fresh_zset(self, window: str) -> str:
-        """Generate key for global freshness ZSET window. SAME AS SYNC."""
-        return f"user:GLOBAL:pool:fresh_{window}"
+        """Generate key for global freshness ZSET window. Uses {GLOBAL} hash tag for cluster."""
+        return f"{{GLOBAL}}:pool:fresh_{window}"
 
     def _key_global_fallback_zset(self) -> str:
-        """Generate key for global fallback ZSET. SAME AS SYNC."""
-        return "user:GLOBAL:pool:fallback"
+        """Generate key for global fallback ZSET. Uses {GLOBAL} hash tag for cluster."""
+        return "{GLOBAL}:pool:fallback"
 
     def _key_global_ugc_zset(self) -> str:
-        """Generate key for global UGC (User-Generated Content) ZSET."""
-        return "user:GLOBAL:pool:ugc"
+        """Generate key for global UGC (User-Generated Content) ZSET. Uses {GLOBAL} hash tag."""
+        return "{GLOBAL}:pool:ugc"
 
     def _key_pop_percentile_pointer(self, user_id: str) -> str:
-        """Pointer key for user's popularity percentile bucket. SAME AS SYNC."""
-        return f"user:{user_id}:pop_percentile_pointer"
+        """Pointer key for user's popularity percentile bucket. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:pop_percentile_pointer"
 
     def _key_refill_failures(self, user_id: str, rec_type: str) -> str:
-        """Key for tracking consecutive refill failures. SAME AS SYNC."""
-        return f"user:{user_id}:refill_failures:{rec_type}"
+        """Key for tracking consecutive refill failures. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:refill_failures:{rec_type}"
 
     def _key_refill_lock(self, user_id: str, rec_type: str) -> str:
-        """Lock key for refilling a user's rec_type. SAME AS SYNC."""
-        return f"user:{user_id}:refill:lock:{rec_type}"
+        """Lock key for refilling a user's rec_type. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:refill:lock:{rec_type}"
 
     def _key_metrics_attempts(self, rec_type: str) -> str:
         return f"metrics:refill:attempts:{rec_type}"
@@ -1088,11 +599,12 @@ class AsyncRedisLayer:
         return f"metrics:refill:failures:{rec_type}"
 
     def _key_refill_last_stats(self, user_id: str, rec_type: str) -> str:
-        return f"user:{user_id}:refill:last:{rec_type}"
+        """Key for refill stats. Uses hash tag for cluster."""
+        return f"{{user:{user_id}}}:refill:last:{rec_type}"
 
     def _key_following_last_sync(self, user_id: str) -> str:
-        """Key for tracking last sync timestamp for user's following pool."""
-        return f"user:{user_id}:following:last_sync"
+        """Key for tracking last sync timestamp for user's following pool. Uses hash tag."""
+        return f"{{user:{user_id}}}:following:last_sync"
 
     def _key_tournament_videos(self, tournament_id: str) -> str:
         """Key for storing tournament video list."""
@@ -1286,14 +798,7 @@ class AsyncRedisLayer:
         except Exception:
             ttl_seconds = -2
         if ttl_seconds and ttl_seconds > 0:
-            # Overwrite value and re-apply remaining TTL
-            ok = bool(await self.db.set(key, bucket))
-            try:
-                await self.db.expire(key, ttl_seconds)
-            except Exception:
-                # If expire fails, return the set result since value still updated
-                return ok
-            return ok
+            return bool(await self.db.set(key, bucket, ex=ttl_seconds))
         else:
             return bool(await self.db.set(key, bucket, ex=TTL_PERCENTILE_POINTER))
 
@@ -1820,8 +1325,8 @@ class AsyncRedisLayer:
         lock_key = self._key_refill_lock(user_id, rec_type)
         try:
             await self.db.delete(lock_key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to release lock {lock_key}: {e}")
 
     async def _record_refill_stats(self, user_id: str, rec_type: str, stats: Dict[str, int]) -> None:
         """Persist last refill stats and metrics counters. ASYNC VERSION."""
@@ -1837,24 +1342,27 @@ class AsyncRedisLayer:
         ttl: int = TTL_VIDEOS_TO_SHOW,
     ) -> Dict[str, int]:
         """
-        Refill user's `videos_to_show:popularity` from global popularity ZSETs with Lua-managed downshift.
-        ASYNC VERSION - EXACT SAME BUSINESS LOGIC AS SYNC.
+        Refill user's `videos_to_show:popularity` from global popularity ZSETs.
+        CLUSTER-SAFE VERSION - splits global reads from user writes.
 
-        Algorithm (UNCHANGED):
-        - Acquire lock `user:{user_id}:refill:lock:popularity`.
-        - Ensure bloom exists.
-        - Call Lua script with pointer_key - Lua handles everything:
-          * Reads current bucket from pointer_key
-          * Hardcoded bucket order in Lua: ["99_100", "90_99", ..., "0_10"]
-          * Tries current bucket for 10 iterations
-          * If target not met after 10 iterations = "10 errors" → downshifts to next bucket
-          * Continues until target met or all buckets exhausted
-          * Updates pointer_key to final bucket
-        - Persist stats and release lock.
+        Algorithm:
+            1. Acquire lock `{user:ID}:refill:lock:popularity`
+            2. Ensure bloom exists
+            3. Read current bucket pointer from `{user:ID}:pop_percentile_pointer`
+            4. Sample from global pools in Python (ZRANDMEMBER - cross-slot OK)
+            5. Call filter_and_add_videos Lua script (user keys only - cluster-safe)
+            6. Update pointer to final bucket
+
+        Args:
+            user_id: User identifier
+            target: Target number of videos to add
+            batch_size: Number of videos to sample per iteration
+            max_iterations: Max iterations per bucket before downshifting
+            ttl: TTL for videos in to_show set
 
         Returns:
-        - Dict with fields: added_total, iterations, filtered_watched, filtered_bloom, valid_after,
-          bucket_start, bucket_final, sources_exhausted
+            Dict with fields: added_total, iterations, filtered_watched, filtered_bloom,
+            valid_after, bucket_start, bucket_final, sources_exhausted
         """
         rec_type = "popularity"
         await self._acquire_lock(user_id, rec_type)
@@ -1867,31 +1375,94 @@ class AsyncRedisLayer:
 
             now = int(time.time())
 
-            # Build list of all 11 global popularity bucket keys (KEYS[5-15])
-            bucket_keys = [self._key_global_pop_set(bucket) for bucket in self.PERCENTILE_BUCKETS_ORDER]
+            # Step 1: Read current bucket pointer
+            current_bucket = await self.db.get(pointer_key)
+            if current_bucket:
+                current_bucket = current_bucket.decode('utf-8') if isinstance(current_bucket, bytes) else current_bucket
+            else:
+                current_bucket = "99_100"  # Default to highest bucket
 
-            # Call Lua script - passes pointer_key and all bucket keys, Lua manages downshift internally
-            result = await self.scripts._execute_script(
-                self.scripts.refill_from_popularity_buckets,
-                "refill_from_popularity_buckets",
-                keys=[to_show_key, watched_key, bloom_key, pointer_key] + bucket_keys,
-                args=[now, ttl, target, batch_size, max_iterations, VIDEOS_TO_SHOW_CAPACITY],
-                semaphore=self.redis_semaphore,
-            )
+            bucket_start = current_bucket
 
-            # Parse result (8 values)
-            added_total = int(result[0])
-            iterations = int(result[1])
-            filtered_watched = int(result[2])
-            filtered_bloom = int(result[3])
-            valid_after = int(result[4])
-            bucket_start = result[5].decode('utf-8') if isinstance(result[5], bytes) else result[5]
-            bucket_final = result[6].decode('utf-8') if isinstance(result[6], bytes) else result[6]
-            sources_exhausted = int(result[7])  # 1 if exhausted, 0 if target met
+            # Find starting index in bucket order
+            try:
+                start_idx = self.PERCENTILE_BUCKETS_ORDER.index(current_bucket)
+            except ValueError:
+                start_idx = 0
+                current_bucket = self.PERCENTILE_BUCKETS_ORDER[0]
+
+            # Step 2: Sample from global pools (Python - cross-slot OK)
+            candidates = []
+            iterations_total = 0
+            bucket_final = current_bucket
+            sources_exhausted = True
+
+            for bucket_idx in range(start_idx, len(self.PERCENTILE_BUCKETS_ORDER)):
+                bucket = self.PERCENTILE_BUCKETS_ORDER[bucket_idx]
+                pool_key = self._key_global_pop_set(bucket)
+
+                # Try this bucket for max_iterations
+                for _ in range(max_iterations):
+                    iterations_total += 1
+
+                    # Sample from global pool (ZRANDMEMBER with scores)
+                    batch = await self.db.zrandmember(pool_key, count=batch_size, withscores=True)
+
+                    if not batch:
+                        break  # Bucket empty, move to next
+
+                    # Filter expired videos (score > now means valid)
+                    valid_batch = []
+                    for i in range(0, len(batch), 2):
+                        vid = batch[i]
+                        score = float(batch[i + 1]) if batch[i + 1] else 0
+                        if score > now:
+                            if isinstance(vid, bytes):
+                                vid = vid.decode('utf-8')
+                            valid_batch.append(vid)
+
+                    candidates.extend(valid_batch)
+
+                    # Check if we have enough candidates (2x buffer for filtering)
+                    if len(candidates) >= target * 2:
+                        bucket_final = bucket
+                        sources_exhausted = False
+                        break
+
+                if not sources_exhausted:
+                    break
+                bucket_final = bucket
+
+            # Step 3: Filter and add using Lua script (user keys only - cluster-safe)
+            added_total = 0
+            filtered_watched = 0
+            filtered_bloom = 0
+
+            if candidates:
+                result = await self.scripts._execute_script(
+                    self.scripts.filter_and_add_videos,
+                    "filter_and_add_videos",
+                    keys=[to_show_key, watched_key, bloom_key],
+                    args=[now, ttl, VIDEOS_TO_SHOW_CAPACITY] + candidates,
+                    semaphore=self.redis_semaphore,
+                )
+                added_total = int(result[0])
+                filtered_watched = int(result[1])
+                filtered_bloom = int(result[2])
+
+                # Check if we met the target
+                if added_total >= target:
+                    sources_exhausted = False
+
+            # Step 4: Update pointer to final bucket
+            await self.db.set(pointer_key, bucket_final, ex=TTL_PERCENTILE_POINTER)
+
+            # Count valid videos in pool
+            valid_after = await self.db.zcount(to_show_key, now, "+inf")
 
             stats = {
                 "added_total": added_total,
-                "iterations": iterations,
+                "iterations": iterations_total,
                 "filtered_watched": filtered_watched,
                 "filtered_bloom": filtered_bloom,
                 "valid_after": valid_after,
@@ -1919,22 +1490,30 @@ class AsyncRedisLayer:
         ttl: int = TTL_VIDEOS_TO_SHOW,
     ) -> Dict[str, int]:
         """
-        Refill user's `videos_to_show:freshness` from cascading freshness windows with Lua-managed cascade.
-        ASYNC VERSION - EXACT SAME BUSINESS LOGIC AS SYNC.
+        Refill user's `videos_to_show:freshness` from cascading freshness windows.
+        CLUSTER-SAFE VERSION - splits global reads from user writes.
 
-        Algorithm (UNCHANGED):
-        - Acquire lock `user:{user_id}:refill:lock:freshness`.
-        - Ensure bloom exists.
-        - Call Lua script - Lua handles everything:
-          * Hardcoded window order in Lua: ["l1d", "l7d", "l14d", "l30d", "l90d"]
-          * Tries each window for 10 iterations
-          * If target not met after 10 iterations → cascades to next window
-          * Continues until target met or all windows exhausted
-        - Persist stats and release lock.
+        Algorithm:
+            1. Acquire lock for freshness rec_type
+            2. Ensure bloom filter exists
+            3. Cascade through freshness windows (l1d -> l7d -> l14d -> l30d -> l90d):
+               - For each window, sample videos using ZRANDMEMBER (Python - cross-slot OK)
+               - Filter expired videos (score > now)
+               - Accumulate candidates until 2x target reached
+            4. Call filter_and_add_videos Lua script (user keys only - cluster-safe)
+            5. Record stats and release lock
+
+        Args:
+            user_id: User ID to refill freshness pool for
+            target: Target number of videos to add (default: VIDEOS_TO_SHOW_CAPACITY)
+            windows: Optional list of windows to use (default: all 5)
+            batch_size: Batch size for ZRANDMEMBER sampling (default: 200)
+            max_iterations: Max iterations per window (default: 10)
+            ttl: TTL for videos in the pool (default: TTL_VIDEOS_TO_SHOW)
 
         Returns:
-        - Dict with stats including: added_total, iterations, filtered_watched, filtered_bloom,
-          valid_after, sources_exhausted
+            Dict with stats: added_total, iterations, filtered_watched, filtered_bloom,
+            valid_after, sources_exhausted
         """
         rec_type = "freshness"
         await self._acquire_lock(user_id, rec_type)
@@ -1946,29 +1525,190 @@ class AsyncRedisLayer:
 
             now = int(time.time())
 
-            # Build list of all 5 global freshness window keys (KEYS[4-8])
-            window_keys = [self._key_global_fresh_zset(w) for w in self.FRESHNESS_WINDOWS_ORDER]
+            # Step 1: Sample from freshness windows (Python - cross-slot OK)
+            # Cascade through windows: l1d -> l7d -> l14d -> l30d -> l90d
+            windows_to_use = windows or self.FRESHNESS_WINDOWS_ORDER
+            candidates = []
+            iterations_total = 0
+            sources_exhausted = True
 
-            # Call Lua script - Lua manages window cascade internally
-            result = await self.scripts._execute_script(
-                self.scripts.refill_from_freshness_cascade,
-                "refill_from_freshness_cascade",
-                keys=[to_show_key, watched_key, bloom_key] + window_keys,
-                args=[now, ttl, target, batch_size, max_iterations, VIDEOS_TO_SHOW_CAPACITY],
-                semaphore=self.redis_semaphore,
-            )
+            for window in windows_to_use:
+                pool_key = self._key_global_fresh_zset(window)
 
-            # Parse result (6 values)
-            added_total = int(result[0])
-            iterations = int(result[1])
-            filtered_watched = int(result[2])
-            filtered_bloom = int(result[3])
-            valid_after = int(result[4])
-            sources_exhausted = int(result[5])  # 1 if exhausted, 0 if target met
+                # Try this window for max_iterations
+                for _ in range(max_iterations):
+                    iterations_total += 1
+
+                    # Sample from global pool (ZRANDMEMBER with scores)
+                    batch = await self.db.zrandmember(pool_key, count=batch_size, withscores=True)
+
+                    if not batch:
+                        break  # Window empty, move to next
+
+                    # Filter expired videos (score > now means valid)
+                    valid_batch = []
+                    for i in range(0, len(batch), 2):
+                        vid = batch[i]
+                        score = float(batch[i + 1]) if batch[i + 1] else 0
+                        if score > now:
+                            if isinstance(vid, bytes):
+                                vid = vid.decode('utf-8')
+                            valid_batch.append(vid)
+
+                    candidates.extend(valid_batch)
+
+                    # Check if we have enough candidates (2x buffer for filtering)
+                    if len(candidates) >= target * 2:
+                        sources_exhausted = False
+                        break
+
+                if not sources_exhausted:
+                    break
+
+            # Step 2: Filter and add using Lua script (user keys only - cluster-safe)
+            added_total = 0
+            filtered_watched = 0
+            filtered_bloom = 0
+
+            if candidates:
+                result = await self.scripts._execute_script(
+                    self.scripts.filter_and_add_videos,
+                    "filter_and_add_videos",
+                    keys=[to_show_key, watched_key, bloom_key],
+                    args=[now, ttl, VIDEOS_TO_SHOW_CAPACITY] + candidates,
+                    semaphore=self.redis_semaphore,
+                )
+                added_total = int(result[0])
+                filtered_watched = int(result[1])
+                filtered_bloom = int(result[2])
+
+                # Check if we met the target
+                if added_total >= target:
+                    sources_exhausted = False
+
+            # Count valid videos in pool
+            valid_after = await self.db.zcount(to_show_key, now, "+inf")
 
             stats = {
                 "added_total": added_total,
-                "iterations": iterations,
+                "iterations": iterations_total,
+                "filtered_watched": filtered_watched,
+                "filtered_bloom": filtered_bloom,
+                "valid_after": valid_after,
+                "sources_exhausted": bool(sources_exhausted),
+            }
+
+            # Record metrics
+            if sources_exhausted:
+                await self.db.incr(self._key_metrics_failures(rec_type))
+
+            await self._record_refill_stats(user_id, rec_type, stats)
+            return stats
+        finally:
+            await self._release_lock(user_id, rec_type)
+
+    async def _refill_from_single_pool(
+        self,
+        user_id: str,
+        rec_type: str,
+        global_pool_key: str,
+        target: int,
+        batch_size: int,
+        max_iterations: int,
+        ttl: int,
+    ) -> Dict[str, int]:
+        """
+        Helper to refill user pool from a single global pool.
+        CLUSTER-SAFE VERSION - splits global reads from user writes.
+
+        Algorithm:
+            1. Acquire lock for rec_type
+            2. Ensure bloom filter exists
+            3. Sample from global pool using ZRANDMEMBER (Python - cross-slot OK)
+            4. Filter expired videos (score > now)
+            5. Call filter_and_add_videos Lua script (user keys only - cluster-safe)
+            6. Record stats and release lock
+
+        Args:
+            user_id: User ID to refill pool for
+            rec_type: Feed type (fallback, ugc)
+            global_pool_key: Redis key for the global pool to sample from
+            target: Target number of videos to add
+            batch_size: Batch size for ZRANDMEMBER sampling
+            max_iterations: Max iterations for sampling
+            ttl: TTL for videos in the pool
+
+        Returns:
+            Dict with stats: added_total, iterations, filtered_watched, filtered_bloom,
+            valid_after, sources_exhausted
+        """
+        await self._acquire_lock(user_id, rec_type)
+        try:
+            await self.init_user_bloom_filter(user_id)
+            to_show_key = self._key_videos_to_show(user_id, rec_type)
+            watched_key = self._key_watched_short_lived(user_id)
+            bloom_key = self._key_bloom_permanent(user_id)
+
+            now = int(time.time())
+
+            # Step 1: Sample from global pool (Python - cross-slot OK)
+            candidates = []
+            iterations_total = 0
+            sources_exhausted = True
+
+            for _ in range(max_iterations):
+                iterations_total += 1
+
+                # Sample from global pool (ZRANDMEMBER with scores)
+                batch = await self.db.zrandmember(global_pool_key, count=batch_size, withscores=True)
+
+                if not batch:
+                    break  # Pool empty
+
+                # Filter expired videos (score > now means valid)
+                valid_batch = []
+                for i in range(0, len(batch), 2):
+                    vid = batch[i]
+                    score = float(batch[i + 1]) if batch[i + 1] else 0
+                    if score > now:
+                        if isinstance(vid, bytes):
+                            vid = vid.decode('utf-8')
+                        valid_batch.append(vid)
+
+                candidates.extend(valid_batch)
+
+                # Check if we have enough candidates (2x buffer for filtering)
+                if len(candidates) >= target * 2:
+                    sources_exhausted = False
+                    break
+
+            # Step 2: Filter and add using Lua script (user keys only - cluster-safe)
+            added_total = 0
+            filtered_watched = 0
+            filtered_bloom = 0
+
+            if candidates:
+                result = await self.scripts._execute_script(
+                    self.scripts.filter_and_add_videos,
+                    "filter_and_add_videos",
+                    keys=[to_show_key, watched_key, bloom_key],
+                    args=[now, ttl, VIDEOS_TO_SHOW_CAPACITY] + candidates,
+                    semaphore=self.redis_semaphore,
+                )
+                added_total = int(result[0])
+                filtered_watched = int(result[1])
+                filtered_bloom = int(result[2])
+
+                # Check if we met the target
+                if added_total >= target:
+                    sources_exhausted = False
+
+            # Count valid videos in pool
+            valid_after = await self.db.zcount(to_show_key, now, "+inf")
+
+            stats = {
+                "added_total": added_total,
+                "iterations": iterations_total,
                 "filtered_watched": filtered_watched,
                 "filtered_bloom": filtered_bloom,
                 "valid_after": valid_after,
@@ -1994,49 +1734,32 @@ class AsyncRedisLayer:
     ) -> Dict[str, int]:
         """
         Refill user's `videos_to_show:fallback` from global fallback zset (last resort).
-        ASYNC VERSION - EXACT SAME BUSINESS LOGIC AS SYNC.
+        CLUSTER-SAFE VERSION - delegates to helper that splits global reads from user writes.
 
-        Algorithm (UNCHANGED):
-        - Acquire lock for `fallback` rec_type.
-        - Use `refill_from_single_source` with `user:GLOBAL:pool:fallback`.
-        - Persist stats and release lock.
+        Algorithm:
+            1. Get global fallback pool key
+            2. Delegate to _refill_from_single_pool helper
+
+        Args:
+            user_id: User ID to refill fallback pool for
+            target: Target number of videos to add (default: REFILL_THRESHOLD)
+            batch_size: Batch size for ZRANDMEMBER sampling (default: 200)
+            max_iterations: Max iterations for sampling (default: 5)
+            ttl: TTL for videos in the pool (default: TTL_VIDEOS_TO_SHOW)
+
+        Returns:
+            Dict with stats: added_total, iterations, filtered_watched, filtered_bloom,
+            valid_after, sources_exhausted
         """
-        rec_type = "fallback"
-        await self._acquire_lock(user_id, rec_type)
-        try:
-            await self.init_user_bloom_filter(user_id)
-            to_show_key = self._key_videos_to_show(user_id, rec_type)
-            watched_key = self._key_watched_short_lived(user_id)
-            bloom_key = self._key_bloom_permanent(user_id)
-            global_zset_key = self._key_global_fallback_zset()
-            now = int(time.time())
-
-            result = await self.scripts._execute_script(
-                self.scripts.refill_from_single_source,
-                "refill_from_single_source",
-                keys=[to_show_key, watched_key, bloom_key, global_zset_key],
-                args=[now, ttl, target, batch_size, max_iterations, VIDEOS_TO_SHOW_CAPACITY],
-                semaphore=self.redis_semaphore,
-            )
-
-            # Parse result (6 values)
-            stats = {
-                "added_total": int(result[0]),
-                "iterations": int(result[1]),
-                "filtered_watched": int(result[2]),
-                "filtered_bloom": int(result[3]),
-                "valid_after": int(result[4]),
-                "sources_exhausted": bool(int(result[5])),
-            }
-
-            # Record metrics
-            if stats["sources_exhausted"]:
-                await self.db.incr(self._key_metrics_failures(rec_type))
-
-            await self._record_refill_stats(user_id, rec_type, stats)
-            return stats
-        finally:
-            await self._release_lock(user_id, rec_type)
+        return await self._refill_from_single_pool(
+            user_id=user_id,
+            rec_type="fallback",
+            global_pool_key=self._key_global_fallback_zset(),
+            target=target,
+            batch_size=batch_size,
+            max_iterations=max_iterations,
+            ttl=ttl,
+        )
 
     async def refill_following(
         self,
@@ -2080,7 +1803,6 @@ class AsyncRedisLayer:
             watched_key = self._key_watched_short_lived(user_id)
             bloom_key = self._key_bloom_permanent(user_id)
             now = int(time.time())
-            expiry = now + ttl
 
             # Use filter_and_add_videos Lua script to filter and add in one atomic op
             # This script filters against bloom and watched:short, then adds to pool
@@ -2088,7 +1810,7 @@ class AsyncRedisLayer:
                 self.scripts.filter_and_add_videos,
                 "filter_and_add_videos",
                 keys=[to_show_key, watched_key, bloom_key],
-                args=[now, expiry, VIDEOS_TO_SHOW_CAPACITY] + video_ids,
+                args=[now, ttl, VIDEOS_TO_SHOW_CAPACITY] + video_ids,
                 semaphore=self.redis_semaphore,
             )
 
@@ -2116,15 +1838,11 @@ class AsyncRedisLayer:
     ) -> Dict[str, int]:
         """
         Refill user's `videos_to_show:ugc` from global UGC pool.
-
-        This method refills the user's UGC pool from the global UGC pool
-        (user:GLOBAL:pool:ugc), filtering through bloom and watched:short.
+        CLUSTER-SAFE VERSION - delegates to helper that splits global reads from user writes.
 
         Algorithm:
-            1. Acquire lock for 'ugc' rec_type
-            2. Ensure user bloom filter exists
-            3. Use refill_from_single_source Lua script with global UGC pool
-            4. Persist stats and release lock
+            1. Get global UGC pool key
+            2. Delegate to _refill_from_single_pool helper
 
         Args:
             user_id: User ID to refill UGC pool for
@@ -2137,51 +1855,22 @@ class AsyncRedisLayer:
             Dict with refill stats: added_total, iterations, filtered_watched,
             filtered_bloom, valid_after, sources_exhausted
         """
-        rec_type = "ugc"
-        await self._acquire_lock(user_id, rec_type)
-        try:
-            # Ensure bloom filter exists for user
-            await self.init_user_bloom_filter(user_id)
+        stats = await self._refill_from_single_pool(
+            user_id=user_id,
+            rec_type="ugc",
+            global_pool_key=self._key_global_ugc_zset(),
+            target=target,
+            batch_size=batch_size,
+            max_iterations=max_iterations,
+            ttl=ttl,
+        )
 
-            to_show_key = self._key_videos_to_show(user_id, rec_type)
-            watched_key = self._key_watched_short_lived(user_id)
-            bloom_key = self._key_bloom_permanent(user_id)
-            global_ugc_key = self._key_global_ugc_zset()
-            now = int(time.time())
+        logger.info(
+            f"UGC refill for {user_id}: added={stats['added_total']}, "
+            f"filtered_watched={stats['filtered_watched']}, filtered_bloom={stats['filtered_bloom']}"
+        )
 
-            # Use refill_from_single_source Lua script (same as fallback)
-            result = await self.scripts._execute_script(
-                self.scripts.refill_from_single_source,
-                "refill_from_single_source",
-                keys=[to_show_key, watched_key, bloom_key, global_ugc_key],
-                args=[now, ttl, target, batch_size, max_iterations, VIDEOS_TO_SHOW_CAPACITY],
-                semaphore=self.redis_semaphore,
-            )
-
-            # Parse result (6 values)
-            stats = {
-                "added_total": int(result[0]),
-                "iterations": int(result[1]),
-                "filtered_watched": int(result[2]),
-                "filtered_bloom": int(result[3]),
-                "valid_after": int(result[4]),
-                "sources_exhausted": bool(int(result[5])),
-            }
-
-            # Record metrics
-            if stats["sources_exhausted"]:
-                await self.db.incr(self._key_metrics_failures(rec_type))
-
-            await self._record_refill_stats(user_id, rec_type, stats)
-
-            logger.info(
-                f"UGC refill for {user_id}: added={stats['added_total']}, "
-                f"filtered_watched={stats['filtered_watched']}, filtered_bloom={stats['filtered_bloom']}"
-            )
-
-            return stats
-        finally:
-            await self._release_lock(user_id, rec_type)
+        return stats
 
     async def _background_refill(self, user_id: str, rec_type: str):
         """

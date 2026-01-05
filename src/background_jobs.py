@@ -23,7 +23,7 @@ import numpy as np
 
 from utils.bigquery_client import BigQueryClient
 from async_main import AsyncRedisLayer, POPULARITY_BUCKET_TTL, TTL_VIDEOS_TO_SHOW
-from utils.async_redis_utils import AsyncDragonflyService
+from utils.async_redis_utils import AsyncKVRocksService
 from job_logger import get_job_logger
 import aiohttp
 
@@ -140,14 +140,14 @@ async def release_job_lock(redis_client, job_name: str) -> bool:
 
 async def sync_global_popularity_pools(
     redis_layer: AsyncRedisLayer,
-    dragonfly_service: AsyncDragonflyService
+    kvrocks_service: AsyncKVRocksService
 ) -> None:
     """
     Sync popular videos from BigQuery to Redis percentile buckets.
 
     Args:
         redis_layer: AsyncRedisLayer instance
-        dragonfly_service: AsyncDragonflyService instance
+        kvrocks_service: AsyncKVRocksService instance
 
     Algorithm:
         1. Acquire distributed lock
@@ -161,10 +161,10 @@ async def sync_global_popularity_pools(
     start_time = time.time()
 
     # Get job-specific logger
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock
-    if not await acquire_job_lock(dragonfly_service.client, job_name):
+    if not await acquire_job_lock(kvrocks_service.client, job_name):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return
 
@@ -199,18 +199,25 @@ async def sync_global_popularity_pools(
             if not video_ids:
                 continue
 
+            video_ids = await filter_videos_with_metadata(
+                video_ids, kvrocks_service.client, job_logger
+            )
+            if not video_ids:
+                job_logger.info(f"No videos with metadata for bucket {bucket_name}")
+                continue
+
             # Get bucket-specific TTL
             ttl = POPULARITY_BUCKET_TTL.get(bucket_name, 3 * 24 * 60 * 60)
             expiry = now + ttl
 
             # Clear existing bucket
             bucket_key = redis_layer._key_global_pop_set(bucket_name) # TODO: INSTEAD OF DELETING, add gradual soft ingestion
-            await dragonfly_service.client.delete(bucket_key)
+            await kvrocks_service.client.delete(bucket_key)
 
             # Insert videos in batches using pipeline
             for batch in _batch_list(video_ids, BQ_PIPELINE_SIZE):
                 video_dict = {vid: float(expiry) for vid in batch}
-                await dragonfly_service.client.zadd(bucket_key, video_dict)
+                await kvrocks_service.client.zadd(bucket_key, video_dict)
 
             total_inserted += len(video_ids)
             job_logger.info(f"Inserted {len(video_ids)} videos into {bucket_name} (TTL: {ttl}s)")
@@ -224,7 +231,7 @@ async def sync_global_popularity_pools(
 
     finally:
         # Always release lock
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 def _calculate_percentile_buckets(
@@ -289,14 +296,14 @@ def _calculate_percentile_buckets(
 
 async def sync_freshness_windows(
     redis_layer: AsyncRedisLayer,
-    dragonfly_service: AsyncDragonflyService
+    kvrocks_service: AsyncKVRocksService
 ) -> None:
     """
     Sync fresh videos from BigQuery to Redis time-based windows.
 
     Args:
         redis_layer: AsyncRedisLayer instance
-        dragonfly_service: AsyncDragonflyService instance
+        kvrocks_service: AsyncKVRocksService instance
 
     Algorithm:
         1. Acquire distributed lock
@@ -310,10 +317,10 @@ async def sync_freshness_windows(
     start_time = time.time()
 
     # Get job-specific logger
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock
-    if not await acquire_job_lock(dragonfly_service.client, job_name):
+    if not await acquire_job_lock(kvrocks_service.client, job_name):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return
 
@@ -345,9 +352,16 @@ async def sync_freshness_windows(
                 job_logger.info(f"No videos for window {window}")
                 continue
 
+            window_videos = await filter_videos_with_metadata(
+                window_videos, kvrocks_service.client, job_logger
+            )
+            if not window_videos:
+                job_logger.info(f"No videos with metadata for window {window}")
+                continue
+
             # Clear existing window
             window_key = redis_layer._key_global_fresh_zset(window)
-            await dragonfly_service.client.delete(window_key)
+            await kvrocks_service.client.delete(window_key)
 
             # All freshness videos use same TTL
             expiry = now + TTL_VIDEOS_TO_SHOW
@@ -355,7 +369,7 @@ async def sync_freshness_windows(
             # Insert videos in batches
             for batch in _batch_list(window_videos, BQ_PIPELINE_SIZE):
                 video_dict = {vid: float(expiry) for vid in batch}
-                await dragonfly_service.client.zadd(window_key, video_dict)
+                await kvrocks_service.client.zadd(window_key, video_dict)
 
             total_inserted += len(window_videos)
             job_logger.info(f"Inserted {len(window_videos)} videos into {window}")
@@ -369,7 +383,7 @@ async def sync_freshness_windows(
 
     finally:
         # Always release lock
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 # ============================================================================
@@ -378,14 +392,14 @@ async def sync_freshness_windows(
 
 async def sync_user_bloom_filters(
     redis_layer: AsyncRedisLayer,
-    dragonfly_service: AsyncDragonflyService
+    kvrocks_service: AsyncKVRocksService
 ) -> None:
     """
     Sync user watch history from BigQuery to Redis bloom filters.
 
     Args:
         redis_layer: AsyncRedisLayer instance
-        dragonfly_service: AsyncDragonflyService instance
+        kvrocks_service: AsyncKVRocksService instance
 
     Algorithm:
         1. Acquire distributed lock
@@ -400,10 +414,10 @@ async def sync_user_bloom_filters(
     start_time = time.time()
 
     # Get job-specific logger
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock
-    if not await acquire_job_lock(dragonfly_service.client, job_name):
+    if not await acquire_job_lock(kvrocks_service.client, job_name):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return
 
@@ -440,20 +454,20 @@ async def sync_user_bloom_filters(
             bloom_key = redis_layer._key_bloom_permanent(user_id)
             try:
                 # Check if bloom filter exists
-                exists = await dragonfly_service.client.exists(bloom_key)
+                exists = await kvrocks_service.client.exists(bloom_key)
                 if not exists:
                     continue
                     # Create bloom filter with EXPANSION for auto-scaling
-                    # await dragonfly_service.client.execute_command(
+                    # await kvrocks_service.client.execute_command(
                     #     'BF.RESERVE', bloom_key, BLOOM_ERROR_RATE, BLOOM_INITIAL_CAPACITY,
                     #     'EXPANSION', BLOOM_EXPANSION
                     # )
                     # # Set initial TTL (auto-cleanup after 30 days of inactivity)
-                    # await dragonfly_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
+                    # await kvrocks_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
                     # job_logger.debug(f"Created bloom filter for user {user_id} with expansion and {BLOOM_TTL_DAYS} day TTL")
                 else:
                     # Refresh TTL for existing bloom (sliding expiry)
-                    await dragonfly_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
+                    await kvrocks_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
             except Exception as e:
                 job_logger.warning(f"Error checking/creating bloom filter for {user_id}: {e}")
                 continue
@@ -461,7 +475,7 @@ async def sync_user_bloom_filters(
             # Add videos to bloom filter in batches
             for batch in _batch_list(video_ids, BQ_PIPELINE_SIZE):
                 try:
-                    results = await dragonfly_service.bf_madd(bloom_key, *batch)
+                    results = await kvrocks_service.bf_madd(bloom_key, *batch)
                     added = sum(results)
                     videos_added += added
                     job_logger.debug(f"Added {added} new videos to bloom for {user_id}")
@@ -470,7 +484,7 @@ async def sync_user_bloom_filters(
 
             # Refresh TTL after adding videos (sliding expiry - keeps bloom alive for active users)
             if videos_added > 0:
-                await dragonfly_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
+                await kvrocks_service.client.expire(bloom_key, BLOOM_TTL_DAYS * 86400)
 
             users_processed += 1
 
@@ -490,7 +504,7 @@ async def sync_user_bloom_filters(
 
     finally:
         # Always release lock
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 # ============================================================================
@@ -499,7 +513,7 @@ async def sync_user_bloom_filters(
 
 async def sync_user_following_pool(
     redis_layer: AsyncRedisLayer,
-    dragonfly_service: AsyncDragonflyService,
+    kvrocks_service: AsyncKVRocksService,
     user_id: str
 ) -> Dict[str, int]:
     """
@@ -523,7 +537,7 @@ async def sync_user_following_pool(
 
     Args:
         redis_layer: AsyncRedisLayer instance for Redis operations
-        dragonfly_service: AsyncDragonflyService instance for low-level Redis access
+        kvrocks_service: AsyncKVRocksService instance for low-level Redis access
         user_id: User to sync following pool for
 
     Returns:
@@ -533,10 +547,10 @@ async def sync_user_following_pool(
     start_time = time.time()
 
     # Get job-specific logger (pattern compliance)
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock (pattern compliance) - shorter TTL since this is per-user
-    if not await acquire_job_lock(dragonfly_service.client, job_name, ttl=60):
+    if not await acquire_job_lock(kvrocks_service.client, job_name, ttl=60):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return {"fetched": 0, "added": 0}
 
@@ -573,7 +587,7 @@ async def sync_user_following_pool(
 
     finally:
         # Always release lock (pattern compliance)
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 # ============================================================================
@@ -582,7 +596,7 @@ async def sync_user_following_pool(
 
 async def sync_ugc_pool(
     redis_layer: AsyncRedisLayer,
-    dragonfly_service: AsyncDragonflyService
+    kvrocks_service: AsyncKVRocksService
 ) -> None:
     """
     Sync UGC videos from BigQuery to Redis global UGC pool.
@@ -601,7 +615,7 @@ async def sync_ugc_pool(
 
     Args:
         redis_layer: AsyncRedisLayer instance for key generation
-        dragonfly_service: AsyncDragonflyService instance for Redis operations
+        kvrocks_service: AsyncKVRocksService instance for Redis operations
 
     Returns:
         None
@@ -610,10 +624,10 @@ async def sync_ugc_pool(
     start_time = time.time()
 
     # Get job-specific logger
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock
-    if not await acquire_job_lock(dragonfly_service.client, job_name):
+    if not await acquire_job_lock(kvrocks_service.client, job_name):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return
 
@@ -633,21 +647,28 @@ async def sync_ugc_pool(
 
         job_logger.info(f"Fetched {len(ugc_df)} UGC videos")
 
+        video_ids = ugc_df['video_id'].tolist()
+        video_ids = await filter_videos_with_metadata(
+            video_ids, kvrocks_service.client, job_logger
+        )
+        if not video_ids:
+            job_logger.warning("No UGC videos with metadata in KVRocks")
+            return
+
         # Calculate expiry for TTL management
         now = int(time.time())
         expiry = now + TTL_UGC_VIDEOS
 
         # Clear existing UGC pool
         ugc_key = redis_layer._key_global_ugc_zset()
-        await dragonfly_service.client.delete(ugc_key)
+        await kvrocks_service.client.delete(ugc_key)
 
         # Insert videos with expiry as score
         total_inserted = 0
-        video_ids = ugc_df['video_id'].tolist()
 
         for batch in _batch_list(video_ids, BQ_PIPELINE_SIZE):
             video_dict = {vid: float(expiry) for vid in batch}
-            await dragonfly_service.client.zadd(ugc_key, video_dict)
+            await kvrocks_service.client.zadd(ugc_key, video_dict)
             total_inserted += len(batch)
 
         elapsed = time.time() - start_time
@@ -662,7 +683,7 @@ async def sync_ugc_pool(
 
     finally:
         # Always release lock
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 # ============================================================================
@@ -670,7 +691,7 @@ async def sync_ugc_pool(
 # ============================================================================
 
 async def send_metrics_to_gchat(
-    dragonfly_service: AsyncDragonflyService,
+    kvrocks_service: AsyncKVRocksService,
     webhook_url: str
 ) -> None:
     """
@@ -687,7 +708,7 @@ async def send_metrics_to_gchat(
         5. Release lock
 
     Args:
-        dragonfly_service: AsyncDragonflyService instance for locking
+        kvrocks_service: AsyncKVRocksService instance for locking
         webhook_url: Google Chat webhook URL
 
     Returns:
@@ -697,10 +718,10 @@ async def send_metrics_to_gchat(
     start_time = time.time()
 
     # Get job-specific logger
-    job_logger = get_job_logger(job_name, dragonfly_service.client)
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
 
     # Try to acquire lock (short TTL since this is a quick job)
-    if not await acquire_job_lock(dragonfly_service.client, job_name, ttl=300):
+    if not await acquire_job_lock(kvrocks_service.client, job_name, ttl=300):
         job_logger.info(f"Skipping {job_name} - another worker is handling it")
         return
 
@@ -750,7 +771,7 @@ async def send_metrics_to_gchat(
         raise
 
     finally:
-        await release_job_lock(dragonfly_service.client, job_name)
+        await release_job_lock(kvrocks_service.client, job_name)
 
 
 def format_gchat_message(summary: dict) -> str:
@@ -893,6 +914,31 @@ def _batch_list(items: List, batch_size: int):
         yield items[i:i + batch_size]
 
 
+async def filter_videos_with_metadata(
+    video_ids: List[str],
+    kvrocks_client,
+    job_logger
+) -> List[str]:
+    if not video_ids:
+        return []
+
+    pipe = kvrocks_client.pipeline()
+    for vid in video_ids:
+        pipe.hgetall(f"offchain:metadata:video_details:{vid}")
+    results = await pipe.execute()
+
+    # Filter to videos with problematic metadata TODO: Raise this up with the backend team
+    valid_ids = [vid for vid, data in zip(video_ids, results) if data]
+
+    filtered_count = len(video_ids) - len(valid_ids)
+    if filtered_count > 0:
+        job_logger.debug(
+            f"Filtered {filtered_count}/{len(video_ids)} videos without metadata"
+        )
+
+    return valid_ids
+
+
 def _create_expiry_scores(
     video_ids: List[str],
     ttl: int,
@@ -927,7 +973,7 @@ def _create_expiry_scores(
 
 if __name__ == "__main__":
     import asyncio
-    from utils.async_redis_utils import AsyncDragonflyService
+    from utils.async_redis_utils import AsyncKVRocksService
     from async_main import AsyncRedisLayer
 
     logging.basicConfig(level=logging.INFO)
@@ -935,26 +981,26 @@ if __name__ == "__main__":
     async def test_jobs():
         """Test the background jobs with mock data."""
         # Initialize Redis connection
-        dragonfly_service = AsyncDragonflyService(
-            host=os.getenv("DRAGONFLY_HOST", "localhost"),
-            port=int(os.getenv("DRAGONFLY_PORT", "6379")),
-            password=os.getenv("DRAGONFLY_PASSWORD", "redispass")
+        kvrocks_service = AsyncKVRocksService(
+            host=os.getenv("KVROCKS_HOST", "localhost"),
+            port=int(os.getenv("KVROCKS_PORT", "6379")),
+            password=os.getenv("KVROCKS_PASSWORD")
         )
-        await dragonfly_service.connect()
+        await kvrocks_service.connect()
 
-        redis_layer = AsyncRedisLayer(dragonfly_service)
+        redis_layer = AsyncRedisLayer(kvrocks_service)
         await redis_layer.initialize()
 
         # Test lock acquisition
         logger.info("\nTesting lock acquisition...")
-        lock1 = await acquire_job_lock(dragonfly_service.client, "test_job", ttl=10)
+        lock1 = await acquire_job_lock(kvrocks_service.client, "test_job", ttl=10)
         logger.info(f"First lock attempt: {lock1}")
 
-        lock2 = await acquire_job_lock(dragonfly_service.client, "test_job", ttl=10)
+        lock2 = await acquire_job_lock(kvrocks_service.client, "test_job", ttl=10)
         logger.info(f"Second lock attempt (should fail): {lock2}")
 
         # Release lock
-        released = await release_job_lock(dragonfly_service.client, "test_job")
+        released = await release_job_lock(kvrocks_service.client, "test_job")
         logger.info(f"Lock released: {released}")
 
         # Test sync jobs (will use real BigQuery if SERVICE_CRED is set)
@@ -963,32 +1009,32 @@ if __name__ == "__main__":
 
             # Test popularity sync
             logger.info("\nTesting popularity sync...")
-            await sync_global_popularity_pools(redis_layer, dragonfly_service)
+            await sync_global_popularity_pools(redis_layer, kvrocks_service)
 
             # Test freshness sync
             logger.info("\nTesting freshness sync...")
-            await sync_freshness_windows(redis_layer, dragonfly_service)
+            await sync_freshness_windows(redis_layer, kvrocks_service)
 
             # Test bloom sync
             logger.info("\nTesting bloom sync...")
-            await sync_user_bloom_filters(redis_layer, dragonfly_service)
+            await sync_user_bloom_filters(redis_layer, kvrocks_service)
 
             # Test UGC sync
             logger.info("\nTesting UGC sync...")
-            await sync_ugc_pool(redis_layer, dragonfly_service)
+            await sync_ugc_pool(redis_layer, kvrocks_service)
 
             # Test following sync (on-demand, per-user)
             logger.info("\nTesting following sync (on-demand)...")
             test_user_id = "test_user_123"  # Replace with real user_id for testing
             try:
-                stats = await sync_user_following_pool(redis_layer, dragonfly_service, test_user_id)
+                stats = await sync_user_following_pool(redis_layer, kvrocks_service, test_user_id)
                 logger.info(f"Following sync result: {stats}")
             except Exception as e:
                 logger.error(f"Following sync failed: {e}")
         else:
             logger.warning("SERVICE_CRED not set - skipping BigQuery tests")
 
-        await dragonfly_service.close()
+        await kvrocks_service.close()
 
     # Run tests
     asyncio.run(test_jobs())

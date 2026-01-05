@@ -2,7 +2,7 @@
 Tournament endpoint integration tests.
 
 Uses FastAPI TestClient - no running server needed.
-Uses STAGE Redis (STAGE_DRAGONFLY_* env vars).
+Uses TEST Dragonfly (TEST_DRAGONFLY_* env vars).
 """
 
 import sys
@@ -14,12 +14,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
 load_dotenv()
 
-# Override DRAGONFLY_* env vars with STAGE values BEFORE importing app
-os.environ["DRAGONFLY_HOST"] = os.getenv("STAGE_DRAGONFLY_HOST", "localhost")
-os.environ["DRAGONFLY_PORT"] = os.getenv("STAGE_DRAGONFLY_PORT", "6379")
-os.environ["DRAGONFLY_PASSWORD"] = os.getenv("STAGE_DRAGONFLY_PASSWORD", "")
-os.environ["DRAGONFLY_TLS_ENABLED"] = os.getenv("STAGE_DRAGONFLY_TLS_ENABLED", "false")
-os.environ["DRAGONFLY_CLUSTER_ENABLED"] = os.getenv("STAGE_DRAGONFLY_CLUSTER_ENABLED", "false")
+# Override KVROCKS_* env vars with TEST values BEFORE importing app
+os.environ["KVROCKS_HOST"] = os.getenv("TEST_DRAGONFLY_HOST", "localhost")
+os.environ["KVROCKS_PORT"] = os.getenv("TEST_DRAGONFLY_PORT", "6379")
+os.environ["KVROCKS_PASSWORD"] = os.getenv("TEST_DRAGONFLY_PASSWORD", "")
+os.environ["KVROCKS_TLS_ENABLED"] = os.getenv("TEST_DRAGONFLY_TLS_ENABLED", "false")
+os.environ["KVROCKS_CLUSTER_ENABLED"] = os.getenv("TEST_DRAGONFLY_CLUSTER_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient

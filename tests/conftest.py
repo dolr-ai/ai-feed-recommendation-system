@@ -1,18 +1,30 @@
 """
 Pytest configuration for recommendation system tests.
 
-Uses stage Redis from environment variables (DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD).
-No mocks, no factories - just real Redis connections.
+IMPORTANT: Tests use TEST Dragonfly (TEST_DRAGONFLY_*), never production KVRocks.
+This ensures tests cannot pollute or corrupt production data.
+
+No mocks, no factories - just real test Dragonfly connections.
 """
 
 import os
 import uuid
+import tempfile
 import pytest
 import redis
+from redis.cluster import RedisCluster
 
 # Load .env file if it exists
 from dotenv import load_dotenv
 load_dotenv()
+
+
+def _write_pem_to_temp(content: str) -> str:
+    """Write PEM content to temp file, return path."""
+    fd, path = tempfile.mkstemp(suffix=".pem")
+    os.write(fd, content.encode("utf-8"))
+    os.close(fd)
+    return path
 
 
 def pytest_configure(config):
@@ -23,18 +35,25 @@ def pytest_configure(config):
 @pytest.fixture(scope="session")
 def redis_client():
     """
-    Session-scoped Redis client using STAGE credentials from env.
+    Session-scoped Redis client using TEST Dragonfly credentials.
 
-    Reads connection params from STAGE_DRAGONFLY_* env vars.
-    Stage Redis does not require TLS.
-    Skips all tests if Redis is unavailable.
+    IMPORTANT: Uses TEST_DRAGONFLY_* env vars, never production KVRocks.
+    Skips all tests if test Dragonfly is unavailable.
     """
-    tls_enabled = os.getenv("STAGE_DRAGONFLY_TLS_ENABLED", "false").lower() == "true"
+    # IMPORTANT: Tests use TEST Dragonfly, never production KVRocks
+    host = os.getenv("TEST_DRAGONFLY_HOST")
+    if not host:
+        pytest.skip("TEST_DRAGONFLY_HOST not set. Tests require test credentials.")
+
+    port = int(os.getenv("TEST_DRAGONFLY_PORT", "6379"))
+    password = os.getenv("TEST_DRAGONFLY_PASSWORD")
+    tls_enabled = os.getenv("TEST_DRAGONFLY_TLS_ENABLED", "").lower() == "true"
+    cluster_enabled = os.getenv("TEST_DRAGONFLY_CLUSTER_ENABLED", "").lower() == "true"
 
     connection_kwargs = {
-        "host": os.getenv("STAGE_DRAGONFLY_HOST", "localhost"),
-        "port": int(os.getenv("STAGE_DRAGONFLY_PORT", "6379")),
-        "password": os.getenv("STAGE_DRAGONFLY_PASSWORD"),
+        "host": host,
+        "port": port,
+        "password": password,
         "decode_responses": True,
         "socket_timeout": 10,
     }
@@ -44,12 +63,15 @@ def redis_client():
         connection_kwargs["ssl_cert_reqs"] = None
 
     try:
-        client = redis.Redis(**connection_kwargs)
+        if cluster_enabled:
+            client = RedisCluster(**connection_kwargs)
+        else:
+            client = redis.Redis(**connection_kwargs)
         client.ping()
     except redis.ConnectionError as e:
-        pytest.skip(f"Redis not available: {e}")
+        pytest.skip(f"Test Dragonfly not available: {e}")
     except Exception as e:
-        pytest.skip(f"Redis connection error: {e}")
+        pytest.skip(f"Test Dragonfly connection error: {e}")
 
     yield client
     client.close()
@@ -58,16 +80,27 @@ def redis_client():
 @pytest.fixture(scope="session")
 def redis_config():
     """
-    Return STAGE Redis connection config from environment.
+    Return TEST Dragonfly connection config from environment.
 
-    Returns dict with host, port, password, ssl_enabled for creating services.
-    Stage Redis does not require TLS.
+    IMPORTANT: Uses TEST_DRAGONFLY_* env vars, never production KVRocks.
+
+    Returns dict with host, port, password, ssl_enabled, cluster_enabled.
+    No mTLS needed for test Dragonfly.
     """
+    host = os.getenv("TEST_DRAGONFLY_HOST")
+    if not host:
+        pytest.skip("TEST_DRAGONFLY_HOST not set. Tests require test credentials.")
+
     return {
-        "host": os.getenv("STAGE_DRAGONFLY_HOST", "localhost"),
-        "port": int(os.getenv("STAGE_DRAGONFLY_PORT", "6379")),
-        "password": os.getenv("STAGE_DRAGONFLY_PASSWORD"),
-        "ssl_enabled": os.getenv("STAGE_DRAGONFLY_TLS_ENABLED", "false").lower() == "true",
+        "host": host,
+        "port": int(os.getenv("TEST_DRAGONFLY_PORT", "6379")),
+        "password": os.getenv("TEST_DRAGONFLY_PASSWORD"),
+        "ssl_enabled": os.getenv("TEST_DRAGONFLY_TLS_ENABLED", "").lower() == "true",
+        "cluster_enabled": os.getenv("TEST_DRAGONFLY_CLUSTER_ENABLED", "").lower() == "true",
+        # No mTLS needed for test Dragonfly
+        "ssl_ca_certs": None,
+        "ssl_certfile": None,
+        "ssl_keyfile": None,
     }
 
 

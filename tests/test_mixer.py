@@ -43,11 +43,11 @@ def seed_global_pools(redis_client):
 
     yield
 
-    # Cleanup global pools
+    # Cleanup global pools (key pattern must match helpers.py seeding)
     for bucket in pop_videos:
-        redis_client.delete(f"global:popularity:{bucket}")
+        redis_client.delete(f"{{GLOBAL}}:pool:pop_{bucket}")
     for window in fresh_videos:
-        redis_client.delete(f"global:freshness:{window}")
+        redis_client.delete(f"{{GLOBAL}}:pool:fresh_{window}")
 
 
 class TestMixerRatios:
@@ -67,12 +67,12 @@ class TestMixerRatios:
             5. Count videos by source prefix
             6. Verify ratio is within tolerance
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from async_mixer import AsyncVideoMixer
 
         # Setup async Redis
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -112,11 +112,11 @@ class TestMixerRatios:
             1. Request 50 videos
             2. Verify we get <= 50 videos
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from async_mixer import AsyncVideoMixer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -149,11 +149,11 @@ class TestFollowingDistribution:
             3. Get mixed recommendations
             4. Verify following videos appear in results
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from async_mixer import AsyncVideoMixer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -198,11 +198,11 @@ class TestUGCInterspersing:
             2. Get recommendations
             3. Verify some UGC videos appear
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from async_mixer import AsyncVideoMixer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -246,11 +246,11 @@ class TestMixerSources:
             2. Verify sources dict has expected keys
             3. Verify sum of sources <= total videos
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from async_mixer import AsyncVideoMixer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)

@@ -67,16 +67,16 @@ class AsyncVideoMixer:
     5. Shuffle and return
     """
 
-    def __init__(self, redis_layer: AsyncRedisLayer, dragonfly_service=None):
+    def __init__(self, redis_layer: AsyncRedisLayer, kvrocks_service=None):
         """
         Initialize the async video mixer.
 
         Args:
             redis_layer: Async Redis layer for fetching videos from feeds
-            dragonfly_service: Optional AsyncDragonflyService for background jobs
+            kvrocks_service: Optional AsyncKVRocksService for background jobs
         """
         self.redis = redis_layer
-        self.dragonfly_service = dragonfly_service
+        self.kvrocks_service = kvrocks_service
         logger.info("AsyncVideoMixer initialized (production mode)")
 
     async def _maybe_trigger_following_sync(self, user_id: str) -> None:
@@ -130,7 +130,7 @@ class AsyncVideoMixer:
         await self.redis.db.set(last_sync_key, str(now), ex=FOLLOWING_SYNC_COOLDOWN * 2)
 
         # Trigger background sync for THIS USER only (fire-and-forget)
-        asyncio.create_task(self._background_sync_following(user_id)) #TODO : TO test background_sync_following
+        asyncio.create_task(self._background_sync_following(user_id)) #TODO : Sanitize this function
         logger.info(f"Triggered following sync for user {user_id} (pool_size={pool_size})")
 
     async def _background_sync_following(self, user_id: str) -> None:
@@ -142,7 +142,7 @@ class AsyncVideoMixer:
 
         Algorithm:
             1. Import sync job (lazy import to avoid circular deps)
-            2. Call sync_user_following_pool() with redis_layer and dragonfly_service
+            2. Call sync_user_following_pool() with redis_layer and kvrocks_service
             3. Log results
             4. Handle errors gracefully (log but don't crash)
 
@@ -153,13 +153,13 @@ class AsyncVideoMixer:
             # Lazy import to avoid circular dependencies
             from background_jobs import sync_user_following_pool
 
-            if self.dragonfly_service is None:
-                logger.warning(f"Cannot sync following for {user_id}: dragonfly_service not available")
+            if self.kvrocks_service is None:
+                logger.warning(f"Cannot sync following for {user_id}: kvrocks_service not available")
                 return
 
             stats = await sync_user_following_pool(
                 self.redis,
-                self.dragonfly_service,
+                self.kvrocks_service,
                 user_id
             )
             logger.info(f"Background following sync completed for {user_id}: {stats}")
@@ -499,7 +499,7 @@ if __name__ == "__main__":
     import json
     import asyncio
     from pathlib import Path
-    from utils.async_redis_utils import AsyncDragonflyService
+    from utils.async_redis_utils import AsyncKVRocksService
     from dotenv import load_dotenv
     
     # Load .env from project root (relative to this script's location)
@@ -526,22 +526,22 @@ if __name__ == "__main__":
     async def test_async_mixer():
         """Test the async mixer with production ratios."""
         # Initialize components
-        os.environ.setdefault("DRAGONFLY_HOST", "localhost")
-        os.environ.setdefault("DRAGONFLY_PORT", "6379")
-        os.environ.setdefault("DRAGONFLY_PASSWORD", "redispass")
+        os.environ.setdefault("KVROCKS_HOST", "localhost")
+        os.environ.setdefault("KVROCKS_PORT", "6379")
+        os.environ.setdefault("KVROCKS_PASSWORD", "")
 
-        dragonfly = AsyncDragonflyService(
-            ssl_enabled=os.environ.get("DRAGONFLY_TLS_ENABLED", "false").lower() == "true",
-            cluster_enabled=os.environ.get("DRAGONFLY_CLUSTER_ENABLED", "false").lower() == "true",
+        kvrocks = AsyncKVRocksService(
+            ssl_enabled=os.environ.get("KVROCKS_TLS_ENABLED", "false").lower() == "true",
+            cluster_enabled=os.environ.get("KVROCKS_CLUSTER_ENABLED", "false").lower() == "true",
         )
-        client = await dragonfly.connect()
+        client = await kvrocks.connect()
 
-        redis_layer = AsyncRedisLayer(dragonfly)
+        redis_layer = AsyncRedisLayer(kvrocks)
         await redis_layer.initialize()
 
-        # Pass dragonfly_service to enable background following sync
+        # Pass kvrocks_service to enable background following sync
 
-        mixer = AsyncVideoMixer(redis_layer, dragonfly_service=dragonfly)
+        mixer = AsyncVideoMixer(redis_layer, kvrocks_service=kvrocks)
 
         # Test mixing for a user with production ratios
         test_user = "dqh4f-d6xax-w7tfa-l5vp2-3pyzx-gpap3-gdbrk-ninow-yk7ig-qj3b7-rqe"
@@ -567,7 +567,7 @@ if __name__ == "__main__":
                 print(f"  {feed_type}: {feed_stats}")
 
         # Cleanup
-        await dragonfly.close()
+        await kvrocks.close()
 
     # Run the async test
     asyncio.run(test_async_mixer())

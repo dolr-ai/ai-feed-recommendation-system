@@ -19,11 +19,11 @@ REDIS_MAX_CONNECTIONS = 100  # Per worker
 REDIS_SOCKET_TIMEOUT = 60  # Seconds
 
 REDIS_CONFIG = {
-    "host": os.getenv("DRAGONFLY_HOST", "localhost"),
-    "port": int(os.getenv("DRAGONFLY_PORT", "6379")),
-    "password": os.getenv("DRAGONFLY_PASSWORD", "redispass"),
-    "cluster_enabled": os.getenv("DRAGONFLY_CLUSTER_ENABLED", "false").lower() == "true",
-    "ssl_enabled": os.getenv("DRAGONFLY_TLS_ENABLED", "false").lower() == "true",
+    "host": os.getenv("KVROCKS_HOST", "localhost"),
+    "port": int(os.getenv("KVROCKS_PORT", "6379")),
+    "password": os.getenv("KVROCKS_PASSWORD"),
+    "cluster_enabled": os.getenv("KVROCKS_CLUSTER_ENABLED", "false").lower() == "true",
+    "ssl_enabled": os.getenv("KVROCKS_TLS_ENABLED", "false").lower() == "true",
     "max_connections": REDIS_MAX_CONNECTIONS,
     "socket_timeout": REDIS_SOCKET_TIMEOUT,
 }
@@ -267,7 +267,7 @@ API_WORKERS = 4
 API_RELOAD = os.getenv("ENV", "development") == "development"
 
 # CORS settings
-CORS_ORIGINS = ["*"]  # In production, specify actual origins
+CORS_ORIGINS = ["*"]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ["*"]
 CORS_ALLOW_HEADERS = ["*"]
@@ -332,10 +332,10 @@ STUBBED_CANISTER_ID = "ivkka-7qaaa-aaaas-qbg3q-cai"
 FEATURES = {
     "enable_semantic_search": False,  # Not implemented yet
     "enable_collaborative_filtering": False,  # Not implemented yet
-    "enable_real_bigquery": False,  # Use dummy data for now
+    "enable_real_bigquery": False, 
     "enable_cache_warming": True,  # Proactively warm caches
-    "enable_auto_refill": True,  # Automatically refill low feeds
-    "enable_metrics": True,  # Export Prometheus metrics
+    "enable_auto_refill": True, 
+    "enable_metrics": True,
 }
 
 # ============================================================================

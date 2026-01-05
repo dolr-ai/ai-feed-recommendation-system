@@ -4,10 +4,10 @@ Utils package for recsys-on-premise
 This package contains utility modules for the recommendation system.
 """
 
-from .redis_utils import DragonflyService, get_logger
+from .redis_utils import KVRocksService, get_logger
 
 __all__ = [
-    "DragonflyService",
+    "KVRocksService",
     "get_logger",
 ]
 
