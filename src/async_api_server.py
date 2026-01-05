@@ -33,8 +33,8 @@ sentry_sdk.init(
     ),
     send_default_pii=True,
     traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.01")),
-    # environment=os.getenv("ENV", "production"),
-    environment="stage",
+    environment=os.getenv("ENV", "production"),
+    # environment="stage",
     release=f"feed-server@{os.getenv('APP_VERSION', '2.0.0-async')}",
     auto_session_tracking=True,
     # session_sample_rate=float(os.getenv("SENTRY_SESSION_SAMPLE_RATE", "1.0")),
@@ -56,7 +56,7 @@ from prometheus_client import Counter, Histogram, Gauge, REGISTRY, CollectorRegi
 from prometheus_client.multiprocess import MultiProcessCollector
 
 from async_main import AsyncRedisLayer
-from utils.async_redis_utils import AsyncDragonflyService
+from utils.async_redis_utils import AsyncKVRocksService
 from utils.metrics_utils import hourly_metrics
 from async_mixer import AsyncVideoMixer
 from background_jobs import (
@@ -69,7 +69,7 @@ from background_jobs import (
     format_gchat_message,
 )
 from job_logger import get_job_logs, clear_job_logs, get_job_log_stats
-from metadata_handler import batch_convert_video_ids, batch_convert_video_ids_v2
+from metadata_handler import AsyncMetadataHandler
 from config import (
     REDIS_CONFIG,
     CORS_ORIGINS,
@@ -111,27 +111,58 @@ logger = logging.getLogger(__name__)
 redis_layer: Optional[AsyncRedisLayer] = None
 video_mixer: Optional[AsyncVideoMixer] = None
 scheduler: Optional[AsyncIOScheduler] = None
-dragonfly_service: Optional[AsyncDragonflyService] = None
+kvrocks_service: Optional[AsyncKVRocksService] = None
+metadata_handler: Optional[AsyncMetadataHandler] = None
 
 
 # ============================================================================
 # Prometheus Metrics
 # ============================================================================
+# Use REGISTRY to avoid duplicate registration when module is re-imported
+# (happens with viztracer, uvicorn workers, etc.)
 
-REQUEST_COUNT = Counter(
+from prometheus_client import REGISTRY
+
+def _get_or_create_metric(metric_class, name, description, labelnames=None, **kwargs):
+    """
+    Returns existing metric if already registered, otherwise creates new one.
+    Prevents 'Duplicated timeseries' error on module re-import (viztracer, uvicorn workers).
+
+    Algorithm:
+    1. Attempt to create the metric
+    2. If ValueError (duplicate), find and return the existing collector
+    3. For Counters, internal name is without '_total' suffix
+    """
+    try:
+        if labelnames:
+            return metric_class(name, description, labelnames, **kwargs)
+        return metric_class(name, description, **kwargs)
+    except ValueError:
+        # Metric already registered - find and return it
+        # Counter 'foo_total' is stored as 'foo' internally
+        base_name = name.replace('_total', '') if name.endswith('_total') else name
+        for collector in REGISTRY._names_to_collectors.values():
+            if hasattr(collector, '_name') and collector._name in (base_name, name):
+                return collector
+        raise  # Re-raise if we can't find it
+
+REQUEST_COUNT = _get_or_create_metric(
+    Counter,
     'http_requests_total',
     'Total HTTP requests',
     ['method', 'endpoint', 'status_code']
 )
 
-REQUEST_LATENCY = Histogram(
+REQUEST_LATENCY = _get_or_create_metric(
+    Histogram,
     'http_request_duration_seconds',
     'HTTP request latency in seconds',
     ['method', 'endpoint'],
     buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15, 20]
 )
 
-ACTIVE_REQUESTS = Gauge(
+ACTIVE_REQUESTS = _get_or_create_metric(
+    Gauge,
     'http_requests_active',
     'Number of active HTTP requests'
 )
@@ -408,13 +439,13 @@ async def refresh_global_pools():
         logger.info("Starting global pools refresh from BigQuery...")
 
         # Sync popularity pools
-        await sync_global_popularity_pools(redis_layer, dragonfly_service)
+        await sync_global_popularity_pools(redis_layer, kvrocks_service)
 
         # Sync freshness windows
-        await sync_freshness_windows(redis_layer, dragonfly_service)
+        await sync_freshness_windows(redis_layer, kvrocks_service)
 
         # Sync UGC pool (user-generated content for 5% bias)
-        await sync_ugc_pool(redis_layer, dragonfly_service)
+        await sync_ugc_pool(redis_layer, kvrocks_service)
 
         elapsed = time.time() - start_time
         logger.info(f"Global pools refresh completed in {elapsed:.2f}s")
@@ -449,7 +480,7 @@ async def sync_bloom_filters():
 
         # Run bloom filter sync
         logger.info("Starting bloom filter sync from BigQuery...")
-        await sync_user_bloom_filters(redis_layer, dragonfly_service)
+        await sync_user_bloom_filters(redis_layer, kvrocks_service)
 
         elapsed = time.time() - start_time
         logger.info(f"Bloom filter sync completed in {elapsed:.2f}s")
@@ -471,7 +502,7 @@ async def send_gchat_metrics_report():
         return
 
     try:
-        await send_metrics_to_gchat(dragonfly_service, GCHAT_WEBHOOK_URL)
+        await send_metrics_to_gchat(kvrocks_service, GCHAT_WEBHOOK_URL)
     except Exception as e:
         logger.error(f"Error sending metrics to Google Chat: {e}", exc_info=True)
 
@@ -509,8 +540,8 @@ async def refresh_global_cache():
             logger.warning("No videos fetched from global pools for cache")
             return
 
-        # Convert to metadata format (uses pipelined Redis mappings now)
-        videos_with_metadata = batch_convert_video_ids(videos)
+        # Convert to metadata format (async, reuses shared KVRocks client)
+        videos_with_metadata = await metadata_handler.batch_convert_video_ids(videos)
 
         # Update cache atomically under lock
         async with global_cache.lock:
@@ -558,32 +589,36 @@ async def lifespan(app: FastAPI):
     - Close Redis connection pool
     - Clean up resources
     """
-    global redis_layer, video_mixer, scheduler, dragonfly_service
+    global redis_layer, video_mixer, scheduler, kvrocks_service, metadata_handler
 
     # Startup
     logger.info("Starting async recommendation system (production mode)...")
 
     # Initialize async Redis with connection pooling
     try:
-        dragonfly_service = AsyncDragonflyService(**REDIS_CONFIG)
-        await asyncio.wait_for(dragonfly_service.connect(), timeout=30.0)
+        kvrocks_service = AsyncKVRocksService(**REDIS_CONFIG)
+        await asyncio.wait_for(kvrocks_service.connect(), timeout=30.0)
         logger.info("Async Redis connection pool established")
     except asyncio.TimeoutError:
         logger.error(
-            "Redis connection timeout after 30s - check DRAGONFLY_HOST and network"
+            "KVRocks connection timeout after 30s - check KVROCKS_HOST and network"
         )
         raise
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}")
         raise
 
+    # Initialize async metadata handler (reuses kvrocks_service.client for KVRocks lookups)
+    metadata_handler = AsyncMetadataHandler(kvrocks_service.client)
+    logger.info("Async metadata handler initialized")
+
     # Initialize async Redis layer
-    redis_layer = AsyncRedisLayer(dragonfly_service)
+    redis_layer = AsyncRedisLayer(kvrocks_service)
     await redis_layer.initialize()
     logger.info("Async Redis layer initialized")
 
-    # Initialize async mixer with dragonfly_service for following sync
-    video_mixer = AsyncVideoMixer(redis_layer, dragonfly_service=dragonfly_service)
+    # Initialize async mixer with kvrocks_service for following sync
+    video_mixer = AsyncVideoMixer(redis_layer, kvrocks_service=kvrocks_service)
     logger.info("Async video mixer initialized")
 
     # Initialize scheduler
@@ -675,15 +710,15 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=True)
         logger.info("Background scheduler stopped")
 
-    if dragonfly_service:
-        await dragonfly_service.close()
+    if kvrocks_service:
+        await kvrocks_service.close()
         logger.info("Redis connection pool closed")
 
 
 # Create FastAPI app
 app = FastAPI(
     title="Feed API",
-    description="High-performance async video recommendation system with Redis/Dragonfly caching",
+    description="Video Recommendation API",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -818,9 +853,8 @@ async def get_recommendations_with_metadata(
             videos = await redis_layer.fetch_videos(user_id, rec_type, count)
             sources = {rec_type: len(videos)}
 
-        # Convert video IDs to metadata (canister_id, post_id)
-        # This is the ONE LINE integration with metadata handler
-        video_metadata = batch_convert_video_ids(videos)
+        # Convert video IDs to metadata (async, reuses shared KVRocks client)
+        video_metadata = await metadata_handler.batch_convert_video_ids(videos)
 
         return RecommendationWithMetadataResponse(
             user_id=user_id,
@@ -871,7 +905,7 @@ async def get_recommendations_with_metadata_v2(
             videos = await redis_layer.fetch_videos(user_id, rec_type, count)
             sources = {rec_type: len(videos)}
 
-        video_metadata = batch_convert_video_ids_v2(videos)
+        video_metadata = await metadata_handler.batch_convert_video_ids_v2(videos)
 
         return RecommendationWithMetadataV2Response(
             user_id=user_id,
@@ -942,8 +976,8 @@ async def get_global_cache(
         result = await redis_layer.fetch_from_global_pools_raw(count)
 
         if include_metadata:
-            # Enrich with metadata (uses pipelined Redis mappings)
-            video_metadata = batch_convert_video_ids(result["videos"])
+            # Enrich with metadata (async, reuses shared KVRocks client)
+            video_metadata = await metadata_handler.batch_convert_video_ids(result["videos"])
             return GlobalCacheWithMetadataResponse(
                 videos=video_metadata,
                 count=len(video_metadata),
@@ -1008,7 +1042,7 @@ async def health_check():
     """
     try:
         redis_connected = (
-            await dragonfly_service.verify_connection() if dragonfly_service else False
+            await kvrocks_service.verify_connection() if kvrocks_service else False
         )
         scheduler_running = scheduler.running if scheduler else False
         uptime = (
@@ -1125,40 +1159,40 @@ async def system_status():
         status = {
             "timestamp": datetime.utcnow().isoformat(),
             "version": "2.0.0-async",
-            "environment": os.getenv("ENV", "development"),
+            "environment": os.getenv("ENV", "production"),
             "components": {
                 "redis": {
                     "connected": (
-                        await dragonfly_service.verify_connection()
-                        if dragonfly_service
+                        await kvrocks_service.verify_connection()
+                        if kvrocks_service
                         else False
                     ),
-                    "host": os.getenv("DRAGONFLY_HOST", "unknown"),
-                    "port": os.getenv("DRAGONFLY_PORT", "unknown"),
+                    "host": os.getenv("KVROCKS_HOST", "unknown"),
+                    "port": os.getenv("KVROCKS_PORT", "unknown"),
                     "pool": {
                         "max_connections": (
-                            dragonfly_service.max_connections
-                            if dragonfly_service
+                            kvrocks_service.max_connections
+                            if kvrocks_service
                             else 0
                         ),
                         "created_connections": (
-                            len(dragonfly_service.pool._created_connections)
-                            if dragonfly_service
-                            and hasattr(dragonfly_service.pool, "_created_connections")
+                            len(kvrocks_service.pool._created_connections)
+                            if kvrocks_service
+                            and hasattr(kvrocks_service.pool, "_created_connections")
                             else 0
                         ),
                         "available_connections": (
-                            len(dragonfly_service.pool._available_connections)
-                            if dragonfly_service
+                            len(kvrocks_service.pool._available_connections)
+                            if kvrocks_service
                             and hasattr(
-                                dragonfly_service.pool, "_available_connections"
+                                kvrocks_service.pool, "_available_connections"
                             )
                             else 0
                         ),
                         "in_use_connections": (
-                            len(dragonfly_service.pool._in_use_connections)
-                            if dragonfly_service
-                            and hasattr(dragonfly_service.pool, "_in_use_connections")
+                            len(kvrocks_service.pool._in_use_connections)
+                            if kvrocks_service
+                            and hasattr(kvrocks_service.pool, "_in_use_connections")
                             else 0
                         ),
                     },
@@ -1328,10 +1362,10 @@ async def debug_user(user_id: str):
 #
 #         # Check if job is already running
 #         lock_key = f"{JOB_LOCK_KEY_PREFIX}popularity_sync"
-#         is_locked = await dragonfly_service.client.exists(lock_key)
+#         is_locked = await kvrocks_service.client.exists(lock_key)
 #
 #         if is_locked:
-#             current_holder = await dragonfly_service.client.get(lock_key)
+#             current_holder = await kvrocks_service.client.get(lock_key)
 #             return {
 #                 "triggered": False,
 #                 "status": "already_running",
@@ -1341,7 +1375,7 @@ async def debug_user(user_id: str):
 #
 #         # Trigger sync in background
 #         asyncio.create_task(
-#             sync_global_popularity_pools(redis_layer, dragonfly_service)
+#             sync_global_popularity_pools(redis_layer, kvrocks_service)
 #         )
 #
 #         return {
@@ -1365,10 +1399,10 @@ async def debug_user(user_id: str):
 #             raise HTTPException(status_code=503, detail="SERVICE_CRED not configured")
 #
 #         lock_key = f"{JOB_LOCK_KEY_PREFIX}freshness_sync"
-#         is_locked = await dragonfly_service.client.exists(lock_key)
+#         is_locked = await kvrocks_service.client.exists(lock_key)
 #
 #         if is_locked:
-#             current_holder = await dragonfly_service.client.get(lock_key)
+#             current_holder = await kvrocks_service.client.get(lock_key)
 #             return {
 #                 "triggered": False,
 #                 "status": "already_running",
@@ -1376,7 +1410,7 @@ async def debug_user(user_id: str):
 #                 "message": "Freshness sync is already running",
 #             }
 #
-#         asyncio.create_task(sync_freshness_windows(redis_layer, dragonfly_service))
+#         asyncio.create_task(sync_freshness_windows(redis_layer, kvrocks_service))
 #
 #         return {
 #             "triggered": True,
@@ -1399,10 +1433,10 @@ async def debug_user(user_id: str):
 #             raise HTTPException(status_code=503, detail="SERVICE_CRED not configured")
 #
 #         lock_key = f"{JOB_LOCK_KEY_PREFIX}bloom_sync"
-#         is_locked = await dragonfly_service.client.exists(lock_key)
+#         is_locked = await kvrocks_service.client.exists(lock_key)
 #
 #         if is_locked:
-#             current_holder = await dragonfly_service.client.get(lock_key)
+#             current_holder = await kvrocks_service.client.get(lock_key)
 #             return {
 #                 "triggered": False,
 #                 "status": "already_running",
@@ -1410,7 +1444,7 @@ async def debug_user(user_id: str):
 #                 "message": "Bloom sync is already running",
 #             }
 #
-#         asyncio.create_task(sync_user_bloom_filters(redis_layer, dragonfly_service))
+#         asyncio.create_task(sync_user_bloom_filters(redis_layer, kvrocks_service))
 #
 #         return {
 #             "triggered": True,
@@ -1437,10 +1471,10 @@ async def debug_user(user_id: str):
 #         # Check each lock
 #         for job_type in ["popularity", "freshness", "bloom"]:
 #             lock_key = f"{JOB_LOCK_KEY_PREFIX}{job_type}_sync"
-#             is_locked = await dragonfly_service.client.exists(lock_key)
+#             is_locked = await kvrocks_service.client.exists(lock_key)
 #
 #             if is_locked:
-#                 current_holder = await dragonfly_service.client.get(lock_key)
+#                 current_holder = await kvrocks_service.client.get(lock_key)
 #                 results[job_type] = {
 #                     "triggered": False,
 #                     "status": "already_running",
@@ -1450,15 +1484,15 @@ async def debug_user(user_id: str):
 #                 # Trigger the appropriate sync
 #                 if job_type == "popularity":
 #                     asyncio.create_task(
-#                         sync_global_popularity_pools(redis_layer, dragonfly_service)
+#                         sync_global_popularity_pools(redis_layer, kvrocks_service)
 #                     )
 #                 elif job_type == "freshness":
 #                     asyncio.create_task(
-#                         sync_freshness_windows(redis_layer, dragonfly_service)
+#                         sync_freshness_windows(redis_layer, kvrocks_service)
 #                     )
 #                 elif job_type == "bloom":
 #                     asyncio.create_task(
-#                         sync_user_bloom_filters(redis_layer, dragonfly_service)
+#                         sync_user_bloom_filters(redis_layer, kvrocks_service)
 #                     )
 #
 #                 results[job_type] = {"triggered": True, "status": "started"}
@@ -1488,12 +1522,12 @@ async def debug_user(user_id: str):
 #             lock_key = f"{JOB_LOCK_KEY_PREFIX}{job_type}"
 #
 #             # Check if lock exists
-#             is_locked = await dragonfly_service.client.exists(lock_key)
+#             is_locked = await kvrocks_service.client.exists(lock_key)
 #
 #             if is_locked:
 #                 # Get lock holder and TTL
-#                 holder = await dragonfly_service.client.get(lock_key)
-#                 ttl = await dragonfly_service.client.ttl(lock_key)
+#                 holder = await kvrocks_service.client.get(lock_key)
+#                 ttl = await kvrocks_service.client.ttl(lock_key)
 #
 #                 status[job_type] = {
 #                     "running": True,
@@ -1549,7 +1583,7 @@ async def debug_user(user_id: str):
 #
 #         # Get logs from Redis
 #         job_name = f"{job_type}_sync"
-#         logs = await get_job_logs(dragonfly_service.client, job_name, limit)
+#         logs = await get_job_logs(kvrocks_service.client, job_name, limit)
 #
 #         return {"job_type": job_name, "log_count": len(logs), "logs": logs}
 #
@@ -1578,7 +1612,7 @@ async def debug_user(user_id: str):
 #             )
 #
 #         job_name = f"{job_type}_sync"
-#         cleared = await clear_job_logs(dragonfly_service.client, job_name)
+#         cleared = await clear_job_logs(kvrocks_service.client, job_name)
 #
 #         return {
 #             "success": cleared,
@@ -1606,8 +1640,8 @@ async def debug_user(user_id: str):
 #
 #         for job_type in ["popularity", "freshness", "bloom"]:
 #             job_name = f"{job_type}_sync"
-#             logs = await get_job_logs(dragonfly_service.client, job_name, limit)
-#             stats = await get_job_log_stats(dragonfly_service.client, job_name)
+#             logs = await get_job_logs(kvrocks_service.client, job_name, limit)
+#             stats = await get_job_log_stats(kvrocks_service.client, job_name)
 #
 #             all_logs[job_name] = {
 #                 "count": len(logs),
@@ -1642,7 +1676,7 @@ async def debug_user(user_id: str):
 #             )
 #
 #         job_name = f"{job_type}_sync"
-#         stats = await get_job_log_stats(dragonfly_service.client, job_name)
+#         stats = await get_job_log_stats(kvrocks_service.client, job_name)
 #
 #         return stats
 #
@@ -2105,7 +2139,7 @@ if __name__ == "__main__":
     logger.info("=" * 80)
     logger.info("Starting Feed API")
     logger.info(f"Environment: {os.getenv('ENV', 'development')}")
-    logger.info(f"Redis Host: {os.getenv('DRAGONFLY_HOST', 'localhost')}")
+    logger.info(f"KVRocks Host: {os.getenv('KVROCKS_HOST', 'localhost')}")
     logger.info(f"Log Level: {LOG_LEVEL}")
     logger.info("=" * 80)
 

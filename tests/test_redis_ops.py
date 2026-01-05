@@ -31,10 +31,10 @@ class TestBloomFilterDeduplication:
             3. Fetch videos
             4. Verify watched videos are not in results
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -60,7 +60,7 @@ class TestBloomFilterDeduplication:
 
         finally:
             clear_user_keys(redis_client, user_id)
-            redis_client.delete("global:popularity:99_100")
+            redis_client.delete("{GLOBAL}:pool:pop_99_100")
             await service.close()
 
     @pytest.mark.integration
@@ -74,10 +74,10 @@ class TestBloomFilterDeduplication:
             2. Verify bloom filter key exists
             3. Check that marked videos are in bloom filter
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -90,8 +90,8 @@ class TestBloomFilterDeduplication:
             videos = ["vid_perm_001", "vid_perm_002", "vid_perm_003"]
             await redis_layer.mark_videos_permanently_watched(user_id, videos)
 
-            # Bloom filter key should exist
-            bloom_key = f"user:{user_id}:bloom:permanent"
+            # Bloom filter key should exist (cluster-safe pattern)
+            bloom_key = f"{{user:{user_id}}}:bloom:permanent"
             exists = redis_client.exists(bloom_key)
             assert exists, "Bloom filter key should exist"
 
@@ -114,10 +114,10 @@ class TestCooldownBehavior:
             2. Mark videos with cooldown
             3. Verify cooldown set contains the videos
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -134,8 +134,8 @@ class TestCooldownBehavior:
 
             assert count == 2, f"Expected 2 videos marked, got {count}"
 
-            # Check cooldown set (key is user:{id}:watched:short)
-            cooldown_key = f"user:{user_id}:watched:short"
+            # Check cooldown set (cluster-safe key pattern)
+            cooldown_key = f"{{user:{user_id}}}:watched:short"
             members = redis_client.zrange(cooldown_key, 0, -1)
             for vid in videos:
                 assert vid in members, f"{vid} should be in cooldown set"
@@ -159,11 +159,11 @@ class TestRefillTriggers:
             2. Check needs_refill
             3. Verify it returns True
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         from config import REFILL_THRESHOLD
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -198,11 +198,11 @@ class TestRefillTriggers:
             3. Fetch videos
             4. Verify function completes without error
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from async_main import AsyncRedisLayer
         import asyncio
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         redis_layer = AsyncRedisLayer(service)
@@ -230,8 +230,8 @@ class TestRefillTriggers:
 
         finally:
             clear_user_keys(redis_client, user_id)
-            redis_client.delete("global:popularity:99_100")
-            redis_client.delete("global:popularity:90_99")
+            redis_client.delete("{GLOBAL}:pool:pop_99_100")
+            redis_client.delete("{GLOBAL}:pool:pop_90_99")
             await service.close()
 
 
@@ -250,7 +250,7 @@ class TestPoolExpiry:
             4. Verify only future-expiry videos counted
         """
         user_id = "test_expiry_001"
-        pool_key = f"user:{user_id}:videos_to_show:popularity"
+        pool_key = f"{{user:{user_id}}}:videos_to_show:popularity"
 
         try:
             now = int(time.time())

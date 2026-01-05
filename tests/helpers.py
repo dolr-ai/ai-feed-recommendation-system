@@ -40,7 +40,7 @@ def seed_global_popularity(client, videos_by_bucket: Dict[str, List[str]], ttl: 
     added = {}
 
     for bucket, videos in videos_by_bucket.items():
-        key = f"global:popularity:{bucket}"
+        key = f"{{GLOBAL}}:pool:pop_{bucket}"
         client.delete(key)
         if videos:
             mapping = {vid: expiry for vid in videos}
@@ -68,7 +68,7 @@ def seed_global_freshness(client, videos_by_window: Dict[str, List[str]], ttl: i
     added = {}
 
     for window, videos in videos_by_window.items():
-        key = f"global:freshness:{window}"
+        key = f"{{GLOBAL}}:pool:fresh_{window}"
         client.delete(key)
         if videos:
             mapping = {vid: expiry for vid in videos}
@@ -92,7 +92,7 @@ def seed_user_pool(client, user_id: str, rec_type: str, videos: List[str], ttl: 
     Returns:
         Number of videos added
     """
-    key = f"user:{user_id}:videos_to_show:{rec_type}"
+    key = f"{{user:{user_id}}}:videos_to_show:{rec_type}"
     client.delete(key)
 
     if not videos:
@@ -115,7 +115,8 @@ def clear_user_keys(client, user_id: str) -> int:
     Returns:
         Number of keys deleted
     """
-    pattern = f"user:{user_id}:*"
+    # Match cluster-safe key pattern with hash tags
+    pattern = f"{{user:{user_id}}}:*"
     keys = client.keys(pattern)
     if not keys:
         return 0
@@ -133,7 +134,7 @@ def clear_global_pools(client):
         Number of keys deleted
     """
     deleted = 0
-    for pattern in ["global:popularity:*", "global:freshness:*", "global:ugc"]:
+    for pattern in ["{GLOBAL}:pool:pop_*", "{GLOBAL}:pool:fresh_*", "{GLOBAL}:pool:ugc"]:
         keys = client.keys(pattern)
         if keys:
             deleted += client.delete(*keys)

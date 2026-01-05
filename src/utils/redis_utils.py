@@ -24,8 +24,8 @@ def get_logger(name: str) -> logging.Logger:
 logger = get_logger(__name__)
 
 
-class DragonflyService:
-    """Dragonfly Redis service class for high-performance Redis operations"""
+class KVRocksService:
+    """KVRocks service class for high-performance Redis-compatible operations"""
 
     def __init__(
         self,
@@ -41,11 +41,11 @@ class DragonflyService:
         **kwargs,
     ):
         """
-        Initialize Dragonfly service with connection parameters
+        Initialize KVRocks service with connection parameters
 
         Args:
-            host: Dragonfly instance host/IP address
-            port: Dragonfly instance port (default: 6379)
+            host: KVRocks instance host/IP address
+            port: KVRocks instance port (default: 6379)
             password: Optional password for authentication
             instance_id: Optional instance ID for logging/identification
             socket_connect_timeout: Connection timeout in seconds
@@ -56,31 +56,14 @@ class DragonflyService:
             **kwargs: Additional redis client parameters
         """
         # Check environment variables for configuration
-        self.host = (
-            host
-            or os.environ.get("DRAGONFLY_HOST")
-            or os.environ.get("REDIS_HOST")
-            or "localhost"
-        )
-        self.port = port or int(
-            os.environ.get("DRAGONFLY_PORT", os.environ.get("REDIS_PORT", 6379))
-        )
-        self.password = (
-            password
-            or os.environ.get("DRAGONFLY_PASSWORD")
-            or os.environ.get("REDIS_PASSWORD")
-        )
-        self.instance_id = (
-            instance_id
-            or os.environ.get("DRAGONFLY_INSTANCE_ID")
-            or f"{self.host}:{self.port}"
-        )
+        self.host = host or os.environ.get("KVROCKS_HOST", "localhost")
+        self.port = port or int(os.environ.get("KVROCKS_PORT", 6379))
+        self.password = password or os.environ.get("KVROCKS_PASSWORD")
+        self.instance_id = instance_id or f"{self.host}:{self.port}"
 
         # Get cluster mode from env if not provided
         if cluster_enabled is None:
-            cluster_enabled_env = os.environ.get(
-                "DRAGONFLY_CLUSTER_ENABLED", "false"
-            ).lower()
+            cluster_enabled_env = os.environ.get("KVROCKS_CLUSTER_ENABLED", "false").lower()
             self.cluster_enabled = cluster_enabled_env == "true"
         else:
             self.cluster_enabled = cluster_enabled
@@ -93,13 +76,13 @@ class DragonflyService:
         self.kwargs = kwargs
 
         logger.info(
-            f"Initialized DragonflyService with host={self.host}, port={self.port}, "
+            f"Initialized KVRocksService with host={self.host}, port={self.port}, "
             f"cluster_enabled={self.cluster_enabled}, ssl_enabled={self.ssl_enabled}"
         )
 
     def connect(self) -> redis.Redis:
         """
-        Create and return a connected Dragonfly client
+        Create and return a connected KVRocks client
 
         Returns:
             Connected Redis client instance
@@ -149,12 +132,12 @@ class DragonflyService:
                 "in cluster mode" if self.cluster_enabled else "in standalone mode"
             )
             logger.info(
-                f"Successfully connected to Dragonfly instance {self.instance_id} {ssl_status} {cluster_status}"
+                f"Successfully connected to KVRocks instance {self.instance_id} {ssl_status} {cluster_status}"
             )
             return self.client
 
         except Exception as e:
-            logger.error(f"Failed to connect to Dragonfly {self.instance_id}: {e}")
+            logger.error(f"Failed to connect to KVRocks {self.instance_id}: {e}")
             raise
 
     def get_client(self) -> redis.Redis:
@@ -174,13 +157,13 @@ class DragonflyService:
         except Exception:
             # Reconnect if connection is stale
             logger.debug(
-                f"Reconnecting to Dragonfly {self.instance_id} due to stale connection"
+                f"Reconnecting to KVRocks {self.instance_id} due to stale connection"
             )
             return self.connect()
 
     def verify_connection(self) -> bool:
         """
-        Verify connection to Dragonfly instance
+        Verify connection to KVRocks instance
 
         Returns:
             True if connection successful, False otherwise
@@ -192,7 +175,7 @@ class DragonflyService:
             return True
         except Exception as e:
             logger.error(
-                f"Dragonfly connection verification failed for {self.instance_id}: {e}"
+                f"KVRocks connection verification failed for {self.instance_id}: {e}"
             )
             return False
 
@@ -967,7 +950,7 @@ class DragonflyService:
 
     def bf_madd(self, key: str, *items: str) -> List[bool]:
         """
-        Add multiple items to a Bloom filter (Dragonfly compatible implementation)
+        Add multiple items to a Bloom filter (pipelined implementation)
 
         Args:
             key: The Bloom filter key
@@ -977,7 +960,7 @@ class DragonflyService:
             List of booleans indicating if each item was newly added
 
         Note:
-            Dragonfly doesn't support BF.MADD, so this uses pipelined BF.ADD commands
+            Uses pipelined BF.ADD commands for compatibility across Redis implementations
         """
         try:
             client = self.get_client()
@@ -1019,7 +1002,7 @@ class DragonflyService:
 
     def bf_mexists(self, key: str, *items: str) -> List[bool]:
         """
-        Check if multiple items exist in a Bloom filter (Dragonfly compatible implementation)
+        Check if multiple items exist in a Bloom filter (pipelined implementation)
 
         Args:
             key: The Bloom filter key
@@ -1029,7 +1012,7 @@ class DragonflyService:
             List of booleans indicating if each item might exist
 
         Note:
-            Dragonfly doesn't support BF.MEXISTS, so this uses pipelined BF.EXISTS commands
+            Uses pipelined BF.EXISTS commands for compatibility across Redis implementations
         """
         try:
             client = self.get_client()
@@ -1049,7 +1032,7 @@ class DragonflyService:
 
     def bf_info(self, key: str) -> Dict[str, Any]:
         """
-        Get information about a Bloom filter (Dragonfly compatible implementation)
+        Get information about a Bloom filter
 
         Args:
             key: The Bloom filter key
@@ -1058,7 +1041,7 @@ class DragonflyService:
             Dictionary with available filter information
 
         Note:
-            Dragonfly doesn't support BF.INFO, returns basic info only
+            Falls back to basic info if BF.INFO is not supported
         """
         try:
             client = self.get_client()
@@ -1090,7 +1073,7 @@ class DragonflyService:
                     return {
                         "filter_name": key,
                         "status": "exists" if self.exists(key) else "not_found",
-                        "note": "BF.INFO not supported by this Redis instance (Dragonfly)",
+                        "note": "BF.INFO not supported by this Redis instance",
                     }
                 else:
                     raise bf_info_error
@@ -1103,7 +1086,7 @@ class DragonflyService:
 
     def bf_card(self, key: str) -> int:
         """
-        Get the cardinality (estimated number of items) in a Bloom filter (Dragonfly compatible)
+        Get the cardinality (estimated number of items) in a Bloom filter
 
         Args:
             key: The Bloom filter key
@@ -1112,7 +1095,7 @@ class DragonflyService:
             Estimated number of items in the filter
 
         Note:
-            Dragonfly doesn't support BF.CARD, returns -1 as fallback
+            Returns -1 as fallback if BF.CARD is not supported
         """
         try:
             client = self.get_client()

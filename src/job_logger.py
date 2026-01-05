@@ -272,12 +272,12 @@ async def get_job_log_stats(redis_client, job_name: str) -> Dict:
 if __name__ == "__main__":
     # Test the module
     import asyncio
-    from utils.async_redis_utils import AsyncDragonflyService
+    from utils.async_redis_utils import AsyncKVRocksService
 
     async def test_job_logger():
         """Test the job logging functionality."""
         # Initialize Redis
-        service = AsyncDragonflyService()
+        service = AsyncKVRocksService()
         await service.connect()
         client = service.client
 

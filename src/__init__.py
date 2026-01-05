@@ -10,9 +10,9 @@ __author__ = "Yral Team"
 __email__ = "team@yral.com"
 
 # Import main utilities for easy access
-from .utils import DragonflyService, get_logger
+from .utils import KVRocksService, get_logger
 
 __all__ = [
-    "DragonflyService",
+    "KVRocksService",
     "get_logger",
 ]

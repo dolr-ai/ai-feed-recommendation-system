@@ -29,10 +29,10 @@ class TestDistributedLocking:
             2. Verify lock is acquired
             3. Release lock
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from background_jobs import acquire_job_lock, release_job_lock
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         job_name = "test_job_lock_001"
@@ -65,11 +65,11 @@ class TestDistributedLocking:
             4. Verify second acquisition fails
             5. Release lock
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from background_jobs import acquire_job_lock, release_job_lock
         import asyncio
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         job_name = "test_job_lock_002"
@@ -106,10 +106,10 @@ class TestDistributedLocking:
             3. Acquire lock again
             4. Verify second acquisition succeeds
         """
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from background_jobs import acquire_job_lock, release_job_lock
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         job_name = "test_job_lock_003"
@@ -149,10 +149,10 @@ class TestLockExpiry:
             4. Verify second acquisition succeeds
         """
         import asyncio
-        from utils.async_redis_utils import AsyncDragonflyService
+        from utils.async_redis_utils import AsyncKVRocksService
         from background_jobs import acquire_job_lock
 
-        service = AsyncDragonflyService(**redis_config)
+        service = AsyncKVRocksService(**redis_config)
         await service.connect()
 
         job_name = "test_job_lock_expiry"
