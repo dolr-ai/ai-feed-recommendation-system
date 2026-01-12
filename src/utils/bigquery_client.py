@@ -568,7 +568,7 @@ class BigQueryClient:
             ['video_id', 'global_popularity_score', 'canister_id', 'post_id', 'publisher_user_id']
         """
         query = f"""
-        SELECT
+        SELECT DISTINCT
             p.video_id,
             p.global_popularity_score,
             COALESCE(a.upload_canister_id, b.canister_id) as canister_id,

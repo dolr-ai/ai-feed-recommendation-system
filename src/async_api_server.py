@@ -1762,6 +1762,10 @@ async def register_tournament(
             limit=TOURNAMENT_VIDEO_POOL_SIZE
         )
 
+        # Deduplicate by video_id at source - prevents all downstream duplicate issues
+        # BigQuery LEFT JOINs can return multiple rows per video_id if metadata differs
+        candidates_df = candidates_df.drop_duplicates(subset=['video_id'], keep='first')
+
         if candidates_df.empty:
             raise HTTPException(
                 status_code=503,
@@ -1785,6 +1789,8 @@ async def register_tournament(
 
         # Take top N from filtered results (natural cascade through popularity)
         selected_df = fresh_df.head(video_count)
+        # Defense-in-depth: deduplicate by video_id in case BigQuery returns duplicates
+        selected_df = selected_df.drop_duplicates(subset=['video_id'], keep='first')
 
         # If not enough fresh videos after filtering all 10000, allow partial overlap
         if len(selected_df) < video_count:
@@ -1797,21 +1803,19 @@ async def register_tournament(
 
             # Combine fresh and overlapping DataFrames
             selected_df = pd.concat([selected_df, overlapping_df], ignore_index=True)
+            # Defense-in-depth: deduplicate after concat to prevent same video in both sets
+            selected_df = selected_df.drop_duplicates(subset=['video_id'], keep='first')
 
             logger.warning(
                 f"Tournament {tournament_id}: Using {len(overlapping_df)} overlapping videos "
                 f"due to insufficient fresh videos in pool of {TOURNAMENT_VIDEO_POOL_SIZE}"
             )
 
+        # Graceful degradation: return what we have instead of failing
         if len(selected_df) < video_count:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": "insufficient_videos",
-                    "message": f"Only {len(selected_df)} eligible videos available, need {video_count}",
-                    "available_count": len(selected_df),
-                    "requested_count": video_count
-                }
+            logger.warning(
+                f"Tournament {tournament_id}: Only {len(selected_df)} unique videos available, "
+                f"requested {video_count}. Proceeding with available videos."
             )
 
         videos_with_metadata = selected_df[
