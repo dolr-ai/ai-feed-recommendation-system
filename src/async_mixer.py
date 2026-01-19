@@ -475,7 +475,7 @@ class AsyncVideoMixer:
             },
             "ugc": {
                 "valid_count": ugc_count,
-                "needs_refill": ugc_count < 10,  # Smaller threshold for UGC (5% of feed)
+                "needs_refill": ugc_count < REFILL_THRESHOLD,  # Use standard threshold for 30% ratio
             },
             "following": {
                 "valid_count": following_count,

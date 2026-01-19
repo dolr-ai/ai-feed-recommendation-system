@@ -146,7 +146,7 @@ FALLBACK_RATIOS = {
 
 # UGC mixing ratio - 5% of non-following slots reserved for UGC content
 # This promotes content from real platform users (ai_ugc + ugc_content_approval)
-UGC_RATIO = 0.05  # 5% of remaining slots after following
+UGC_RATIO = 0.30  # 30% of remaining slots after following
 
 # UGC pool TTL (same as other feeds)
 TTL_UGC_VIDEOS = 3 * 24 * 60 * 60  # 3 days
@@ -177,9 +177,19 @@ FOLLOWING_SEGMENT_2_MIN = 10          # At least 10 from following in segment 2
 # TOURNAMENT CONFIGURATION
 # ============================================================================
 
-# Tournament TTL - auto-expire tournament data after this period
-TOURNAMENT_TTL_DAYS = 3
-TOURNAMENT_TTL_SECONDS = TOURNAMENT_TTL_DAYS * 24 * 60 * 60  # 3 days in seconds
+# Tournament duration - how long a tournament is considered "active"
+# After this period, tournament transitions to "expired" status
+TOURNAMENT_DURATION_DAYS = 3
+TOURNAMENT_DURATION_SECONDS = TOURNAMENT_DURATION_DAYS * 24 * 60 * 60  # 259,200 seconds
+
+# Tournament data retention - how long tournament data persists before auto-deletion
+# Allows expired tournaments to be inspected (overlap checks, video lists)
+TOURNAMENT_RETENTION_DAYS = 30
+TOURNAMENT_RETENTION_SECONDS = TOURNAMENT_RETENTION_DAYS * 24 * 60 * 60  # 2,592,000 seconds
+
+# DEPRECATED: Use TOURNAMENT_DURATION_* instead. Kept for backward compatibility.
+TOURNAMENT_TTL_DAYS = TOURNAMENT_DURATION_DAYS
+TOURNAMENT_TTL_SECONDS = TOURNAMENT_DURATION_SECONDS
 
 # Video reuse cooldown - prevent same videos appearing in tournaments too frequently
 TOURNAMENT_VIDEO_REUSE_COOLDOWN_DAYS = 7

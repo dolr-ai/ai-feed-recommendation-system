@@ -5,8 +5,8 @@ uvicorn[standard]==0.24.0
 pydantic==2.4.0
 
 # Data processing
-pandas==2.1.0
-numpy==1.26.0
+pandas>=2.2.0
+numpy>=1.26.0
 
 # BigQuery and Google Cloud
 google-cloud-bigquery==3.13.0

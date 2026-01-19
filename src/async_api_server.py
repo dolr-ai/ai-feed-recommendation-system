@@ -407,6 +407,55 @@ class TournamentErrorResponse(BaseModel):
     requested_count: Optional[int] = None
 
 
+class TournamentOverlapResponse(BaseModel):
+    """Response model for tournament video overlap check."""
+
+    tournament_a_id: str
+    tournament_b_id: str
+    tournament_a_video_count: int
+    tournament_b_video_count: int
+    overlap_count: int
+    overlap_percentage_a: float = Field(
+        description="Overlap as percentage of tournament A's videos"
+    )
+    overlap_percentage_b: float = Field(
+        description="Overlap as percentage of tournament B's videos"
+    )
+    overlapping_video_ids: Optional[List[str]] = Field(
+        default=None,
+        description="List of overlapping video IDs (only if include_video_ids=True)"
+    )
+
+
+class TournamentListItem(BaseModel):
+    """Single tournament in list response."""
+
+    tournament_id: str
+    status: str = Field(description="'active' or 'expired'")
+    video_count: int
+    created_at: str
+    expires_at: str = Field(description="When tournament transitions from active to expired")
+
+
+class TournamentListResponse(BaseModel):
+    """Response for listing all tournaments."""
+
+    count: int
+    active_count: int
+    expired_count: int
+    tournaments: List[TournamentListItem]
+
+
+class TournamentDeleteResponse(BaseModel):
+    """Response for tournament deletion."""
+
+    tournament_id: str
+    deleted: bool
+    status_before_deletion: str = Field(description="Was 'active' or 'expired' before deletion")
+    videos_removed_from_cooldown: int
+    message: str
+
+
 # ============================================================================
 # Background Jobs (ALL ASYNC)
 # ============================================================================
@@ -1938,6 +1987,210 @@ async def get_tournament_videos(
         )
 
 
+@app.get(
+    "/tournament/overlap",
+    response_model=TournamentOverlapResponse,
+    responses={
+        400: {"model": TournamentErrorResponse, "description": "Invalid request (same tournament)"},
+        404: {"model": TournamentErrorResponse, "description": "Tournament not found"},
+    },
+)
+async def check_tournament_overlap(
+    tournament_a: str = Query(..., description="First tournament ID"),
+    tournament_b: str = Query(..., description="Second tournament ID"),
+    include_video_ids: bool = Query(
+        default=True,
+        description="Include list of overlapping video IDs in response"
+    ),
+):
+    """
+    Check video overlap between two tournaments.
+
+    This endpoint compares the video sets of two tournaments and returns
+    overlap statistics including count, percentages, and optionally the
+    list of overlapping video IDs.
+
+    Algorithm:
+        1. Validate tournament IDs are different
+        2. Fetch and compare video sets from both tournaments
+        3. Calculate intersection and percentages
+        4. Return overlap statistics
+
+    Args:
+        tournament_a: First tournament identifier
+        tournament_b: Second tournament identifier
+        include_video_ids: If True, include list of overlapping video IDs
+
+    Returns:
+        TournamentOverlapResponse with overlap statistics
+
+    Raises:
+        HTTPException 400: Same tournament ID provided for both
+        HTTPException 404: One or both tournaments not found
+    """
+    try:
+        result = await redis_layer.get_tournament_overlap(
+            tournament_a,
+            tournament_b,
+            include_video_ids
+        )
+
+        # Handle error cases from utility method
+        if result and "error" in result:
+            if result["error"] == "same_tournament":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "same_tournament",
+                        "message": "Cannot compare a tournament with itself"
+                    }
+                )
+            elif result["error"] == "tournament_not_found":
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "tournament_not_found",
+                        "message": result["message"],
+                        "tournament_id": result.get("tournament_id")
+                    }
+                )
+
+        return TournamentOverlapResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking tournament overlap: {e}")
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": str(e)}
+        )
+
+
+@app.get(
+    "/tournament/list",
+    response_model=TournamentListResponse,
+    responses={401: {"model": TournamentErrorResponse}},
+)
+async def list_tournaments(
+    _: str = Depends(verify_admin_key)
+):
+    """
+    List all tournaments (active and expired) with their status (Admin Only).
+
+    Algorithm:
+        1. Fetch all tournaments from Redis registry
+        2. Calculate status for each based on created_at + duration
+        3. Return sorted by created_at descending
+
+    Returns:
+        TournamentListResponse with count and list of tournaments
+
+    Raises:
+        HTTPException 401: Invalid/missing admin key
+    """
+    try:
+        tournaments = await redis_layer.list_all_tournaments()
+
+        # Count active and expired tournaments
+        active_count = sum(1 for t in tournaments if t["status"] == "active")
+        expired_count = sum(1 for t in tournaments if t["status"] == "expired")
+
+        return TournamentListResponse(
+            count=len(tournaments),
+            active_count=active_count,
+            expired_count=expired_count,
+            tournaments=[
+                TournamentListItem(
+                    tournament_id=t["tournament_id"],
+                    status=t["status"],
+                    video_count=t["video_count"],
+                    created_at=t["created_at"],
+                    expires_at=t["expires_at"]
+                )
+                for t in tournaments
+            ]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing tournaments: {e}")
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": str(e)}
+        )
+
+
+@app.delete(
+    "/tournament/{tournament_id}",
+    response_model=TournamentDeleteResponse,
+    responses={
+        401: {"model": TournamentErrorResponse},
+        404: {"model": TournamentErrorResponse},
+    },
+)
+async def delete_tournament_endpoint(
+    tournament_id: str,
+    _: str = Depends(verify_admin_key)
+):
+    """
+    Delete a tournament and clear its videos from cooldown (Admin Only).
+
+    This immediately removes:
+    - Tournament video list
+    - Tournament metadata
+    - Videos from the 7-day cooldown pool (making them available for new tournaments)
+
+    Algorithm:
+        1. Verify tournament exists
+        2. Remove videos from cooldown ZSET
+        3. Delete tournament data
+        4. Remove from registry
+
+    Args:
+        tournament_id: Tournament to delete
+
+    Returns:
+        TournamentDeleteResponse with deletion summary
+
+    Raises:
+        HTTPException 401: Invalid/missing admin key
+        HTTPException 404: Tournament not found
+    """
+    try:
+        result = await redis_layer.delete_tournament(tournament_id)
+
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "tournament_not_found",
+                    "message": f"Tournament {tournament_id} does not exist"
+                }
+            )
+
+        return TournamentDeleteResponse(
+            tournament_id=result["tournament_id"],
+            deleted=result["deleted"],
+            status_before_deletion=result["status_before_deletion"],
+            videos_removed_from_cooldown=result["videos_removed_from_cooldown"],
+            message=result["message"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting tournament {tournament_id}: {e}")
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": str(e)}
+        )
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -1953,6 +2206,9 @@ async def root():
             "/feedback/{user_id}",
             "/tournament/register",
             "/tournament/{tournament_id}/videos",
+            "/tournament/overlap",
+            "/tournament/list",
+            "/tournament/{tournament_id}",  # DELETE
             "/health",
             "/status",
             "/metrics",
