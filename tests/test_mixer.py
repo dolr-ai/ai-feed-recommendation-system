@@ -217,18 +217,18 @@ class TestUGCInterspersing:
             ugc_videos = generate_video_ids("vid_ugc", 50)
             expiry = float(int(time.time()) + 86400)
             mapping = {vid: expiry for vid in ugc_videos}
-            redis_client.delete("global:ugc")
-            redis_client.zadd("global:ugc", mapping)
+            redis_client.delete("{GLOBAL}:pool:ugc")
+            redis_client.zadd("{GLOBAL}:pool:ugc", mapping)
 
             result = await mixer.get_mixed_recommendations(user_id, count=100)
 
-            # UGC should appear (5% of non-following = ~5 videos)
+            # UGC should appear (30% of non-following = ~25-30 videos)
             ugc_count = sum(1 for v in result.videos if v.startswith("vid_ugc"))
-            assert ugc_count >= 0  # At least some UGC (might be 0 if pool empty)
+            assert ugc_count >= 20, f"Expected >20 UGC videos (30% ratio), got {ugc_count}"
 
         finally:
             clear_user_keys(redis_client, user_id)
-            redis_client.delete("global:ugc")
+            redis_client.delete("{GLOBAL}:pool:ugc")
             await service.close()
 
 

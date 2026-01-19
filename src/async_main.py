@@ -80,6 +80,8 @@ from config import (
     FOLLOWING_REFILL_THRESHOLD,
     TTL_UGC_VIDEOS,
     TOURNAMENT_TTL_SECONDS,
+    TOURNAMENT_DURATION_SECONDS,
+    TOURNAMENT_RETENTION_SECONDS,
     TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS,
 )
 
@@ -618,6 +620,10 @@ class AsyncRedisLayer:
         """Key for tracking recently-used tournament videos (ZSET with timestamps)."""
         return "tournament:recent_videos"
 
+    def _key_tournament_registry(self) -> str:
+        """Key for central registry of all tournament IDs (ZSET with created_at timestamps)."""
+        return "tournament:all"
+
     # ------------------------------------------------------------------------
     # Bloom Filter Operations (ASYNC VERSIONS)
     # ------------------------------------------------------------------------
@@ -901,7 +907,7 @@ class AsyncRedisLayer:
         )
 
         # Trigger background refill if pool is low (fire-and-forget, non-blocking)
-        if valid_count_in_pool < REFILL_THRESHOLD:
+        if valid_count_in_pool < REFILL_THRESHOLD and len(videos) >= count:
             asyncio.create_task(self._background_refill(user_id, rec_type))
             logger.info(
                 f"Triggered background refill for {user_id}:{rec_type} "
@@ -938,6 +944,8 @@ class AsyncRedisLayer:
                         # Mixer handles this via _maybe_trigger_following_sync
                         logger.debug(f"Skipping auto-refill for {user_id}:following (requires BigQuery)")
                         break
+                    elif rec_type == "ugc":
+                        await self.refill_ugc(user_id, target=300)
                     else:
                         logger.warning(f"Unknown rec_type '{rec_type}', skipping refill")
                         break
@@ -1831,7 +1839,7 @@ class AsyncRedisLayer:
     async def refill_ugc(
         self,
         user_id: str,
-        target: int = 100,
+        target: int = 300,
         batch_size: int = 100,
         max_iterations: int = 5,
         ttl: int = TTL_UGC_VIDEOS,
@@ -2185,9 +2193,10 @@ class AsyncRedisLayer:
         Algorithm:
             1. Store videos as JSON strings in a Redis LIST (preserves order + includes metadata)
             2. Store tournament metadata in a HASH (created_at, video_count)
-            3. Set TTL on both keys (3 days)
-            4. Add video IDs to recent_videos ZSET with current timestamp
-            5. Cleanup old entries from recent_videos ZSET
+            3. Set TTL on both keys (30 days - retention period)
+            4. Add tournament_id to registry ZSET with created_at timestamp
+            5. Add video IDs to recent_videos ZSET with current timestamp
+            6. Cleanup old entries from recent_videos ZSET
 
         Args:
             tournament_id: Unique tournament identifier
@@ -2203,6 +2212,7 @@ class AsyncRedisLayer:
         videos_key = self._key_tournament_videos(tournament_id)
         meta_key = self._key_tournament_meta(tournament_id)
         recent_key = self._key_tournament_recent_videos()
+        registry_key = self._key_tournament_registry()
 
         current_time = int(time.time())
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time))
@@ -2218,14 +2228,18 @@ class AsyncRedisLayer:
             # Convert each video dict to JSON string for storage
             json_videos = [json.dumps(v) for v in videos_with_metadata]
             pipe.rpush(videos_key, *json_videos)
-        pipe.expire(videos_key, TOURNAMENT_TTL_SECONDS)
+        # Use retention TTL (30 days) to allow inspection of expired tournaments
+        pipe.expire(videos_key, TOURNAMENT_RETENTION_SECONDS)
 
         # Store tournament metadata
         pipe.hset(meta_key, mapping={
             "created_at": created_at,
             "video_count": len(videos_with_metadata)
         })
-        pipe.expire(meta_key, TOURNAMENT_TTL_SECONDS)
+        pipe.expire(meta_key, TOURNAMENT_RETENTION_SECONDS)
+
+        # Add tournament to registry ZSET with created_at timestamp as score
+        pipe.zadd(registry_key, {tournament_id: current_time})
 
         # Track these videos as recently used (by video_id)
         # Score = timestamp when added to tournament
@@ -2242,7 +2256,7 @@ class AsyncRedisLayer:
 
         logger.info(
             f"Stored tournament {tournament_id} with {len(videos_with_metadata)} videos (with metadata), "
-            f"TTL={TOURNAMENT_TTL_SECONDS}s"
+            f"TTL={TOURNAMENT_RETENTION_SECONDS}s (30-day retention)"
         )
 
         return {
@@ -2323,4 +2337,263 @@ class AsyncRedisLayer:
         return {
             "created_at": meta.get("created_at", ""),
             "video_count": int(meta.get("video_count", 0))
+        }
+
+    async def get_tournament_overlap(
+        self,
+        tournament_a_id: str,
+        tournament_b_id: str,
+        include_video_ids: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Calculate video overlap between two tournaments.
+
+        Algorithm:
+            1. Validate both tournament IDs are different
+            2. Fetch video IDs for tournament A (using get_tournament_videos)
+            3. Fetch video IDs for tournament B
+            4. If either tournament doesn't exist, return error dict
+            5. Convert both lists to sets for O(1) intersection
+            6. Calculate intersection (overlapping videos)
+            7. Compute overlap percentages relative to each tournament
+            8. Return overlap statistics
+
+        Args:
+            tournament_a_id: First tournament identifier
+            tournament_b_id: Second tournament identifier
+            include_video_ids: If True, include list of overlapping video IDs in response
+
+        Returns:
+            Dict with overlap statistics:
+                - tournament_a_id: str
+                - tournament_b_id: str
+                - tournament_a_video_count: int
+                - tournament_b_video_count: int
+                - overlap_count: int
+                - overlap_percentage_a: float (overlap as % of tournament A)
+                - overlap_percentage_b: float (overlap as % of tournament B)
+                - overlapping_video_ids: List[str] (if include_video_ids=True)
+            Error dict if either tournament not found or same tournament provided
+        """
+        # Same tournament check
+        if tournament_a_id == tournament_b_id:
+            return {
+                "error": "same_tournament",
+                "message": "Cannot compare a tournament with itself"
+            }
+
+        # Fetch video IDs for both tournaments (without metadata for efficiency)
+        videos_a = await self.get_tournament_videos(tournament_a_id, with_metadata=False)
+        videos_b = await self.get_tournament_videos(tournament_b_id, with_metadata=False)
+
+        # Handle tournament not found cases
+        if videos_a is None:
+            return {
+                "error": "tournament_not_found",
+                "tournament_id": tournament_a_id,
+                "message": f"Tournament {tournament_a_id} does not exist"
+            }
+        if videos_b is None:
+            return {
+                "error": "tournament_not_found",
+                "tournament_id": tournament_b_id,
+                "message": f"Tournament {tournament_b_id} does not exist"
+            }
+
+        # Convert to sets and calculate intersection
+        set_a = set(videos_a)
+        set_b = set(videos_b)
+        overlapping = set_a & set_b
+
+        # Calculate percentages (handle division by zero)
+        count_a = len(videos_a)
+        count_b = len(videos_b)
+        overlap_count = len(overlapping)
+
+        percentage_a = (overlap_count / count_a * 100) if count_a > 0 else 0.0
+        percentage_b = (overlap_count / count_b * 100) if count_b > 0 else 0.0
+
+        # Build response
+        result = {
+            "tournament_a_id": tournament_a_id,
+            "tournament_b_id": tournament_b_id,
+            "tournament_a_video_count": count_a,
+            "tournament_b_video_count": count_b,
+            "overlap_count": overlap_count,
+            "overlap_percentage_a": round(percentage_a, 2),
+            "overlap_percentage_b": round(percentage_b, 2),
+        }
+
+        if include_video_ids:
+            result["overlapping_video_ids"] = sorted(list(overlapping))
+
+        return result
+
+    async def list_all_tournaments(self) -> List[Dict[str, Any]]:
+        """
+        List all tournaments with their current status.
+
+        Algorithm:
+            1. Get all tournament IDs from registry ZSET (tournament:all)
+            2. For backward compat, also SCAN for tournament:*:meta keys not in registry
+            3. For each tournament, fetch metadata (created_at, video_count)
+            4. Calculate status: "active" if now < created_at + DURATION, else "expired"
+            5. Calculate expires_at: created_at + DURATION_SECONDS
+            6. Return list sorted by created_at descending
+
+        Returns:
+            List of dicts with: tournament_id, status, video_count, created_at, expires_at
+        """
+        registry_key = self._key_tournament_registry()
+        client = await self.db.get_client()
+        current_time = int(time.time())
+
+        # Get tournament IDs from registry ZSET (score = created_at timestamp)
+        registry_entries = await client.zrange(registry_key, 0, -1, withscores=True)
+        registry_ids = set()
+        tournaments = []
+
+        for tournament_id, created_at_score in registry_entries:
+            registry_ids.add(tournament_id)
+            # Fetch metadata for this tournament
+            meta = await self.get_tournament_meta(tournament_id)
+            if meta is None:
+                # Tournament data expired/deleted but still in registry - clean up
+                await client.zrem(registry_key, tournament_id)
+                continue
+
+            created_at_ts = int(created_at_score)
+            expires_at_ts = created_at_ts + TOURNAMENT_DURATION_SECONDS
+
+            # Determine status: active if within duration, else expired
+            status = "active" if current_time < expires_at_ts else "expired"
+
+            tournaments.append({
+                "tournament_id": tournament_id,
+                "status": status,
+                "video_count": meta["video_count"],
+                "created_at": meta["created_at"],
+                "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_ts))
+            })
+
+        # Backward compatibility: scan for tournament:*:meta keys not in registry
+        # This handles tournaments created before the registry was introduced
+        cursor = 0
+        while True:
+            cursor, keys = await client.scan(cursor, match="tournament:*:meta", count=100)
+            for key in keys:
+                # Extract tournament_id from key pattern "tournament:{id}:meta"
+                parts = key.split(":")
+                if len(parts) == 3:
+                    tid = parts[1]
+                    if tid not in registry_ids and tid != "recent_videos" and tid != "all":
+                        # Found a tournament not in registry - add it
+                        meta = await self.get_tournament_meta(tid)
+                        if meta:
+                            # Parse created_at to get timestamp
+                            try:
+                                created_at_struct = time.strptime(meta["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+                                created_at_ts = int(time.mktime(created_at_struct))
+                            except ValueError:
+                                created_at_ts = current_time  # Fallback
+
+                            expires_at_ts = created_at_ts + TOURNAMENT_DURATION_SECONDS
+                            status = "active" if current_time < expires_at_ts else "expired"
+
+                            # Add to registry for future queries
+                            await client.zadd(registry_key, {tid: created_at_ts})
+
+                            tournaments.append({
+                                "tournament_id": tid,
+                                "status": status,
+                                "video_count": meta["video_count"],
+                                "created_at": meta["created_at"],
+                                "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_ts))
+                            })
+                            registry_ids.add(tid)
+
+            if cursor == 0:
+                break
+
+        # Sort by created_at descending (newest first)
+        tournaments.sort(key=lambda x: x["created_at"], reverse=True)
+
+        return tournaments
+
+    async def delete_tournament(self, tournament_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Delete a tournament and clear its videos from cooldown.
+
+        Algorithm:
+            1. Check if tournament exists (return None if not)
+            2. Get tournament metadata for status calculation
+            3. Fetch all video IDs from tournament:{id}:videos
+            4. Remove each video_id from tournament:recent_videos ZSET (clears cooldown)
+            5. Delete tournament:{id}:videos LIST
+            6. Delete tournament:{id}:meta HASH
+            7. Remove tournament_id from tournament:all registry ZSET
+            8. Return deletion summary
+
+        Args:
+            tournament_id: Tournament to delete
+
+        Returns:
+            Dict with: tournament_id, deleted, status_before_deletion, videos_removed_from_cooldown, message
+            None if tournament not found
+        """
+        # Check if tournament exists
+        videos_key = self._key_tournament_videos(tournament_id)
+        meta_key = self._key_tournament_meta(tournament_id)
+        recent_key = self._key_tournament_recent_videos()
+        registry_key = self._key_tournament_registry()
+
+        if not await self.db.exists(videos_key):
+            return None
+
+        client = await self.db.get_client()
+        current_time = int(time.time())
+
+        # Get metadata for status determination before deletion
+        meta = await self.get_tournament_meta(tournament_id)
+        status_before = "expired"
+        if meta:
+            try:
+                created_at_struct = time.strptime(meta["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+                created_at_ts = int(time.mktime(created_at_struct))
+                expires_at_ts = created_at_ts + TOURNAMENT_DURATION_SECONDS
+                status_before = "active" if current_time < expires_at_ts else "expired"
+            except ValueError:
+                pass
+
+        # Fetch video IDs to remove from cooldown
+        video_ids = await self.get_tournament_videos(tournament_id, with_metadata=False)
+        videos_removed = 0
+
+        if video_ids:
+            # Remove videos from cooldown ZSET using pipeline
+            pipe = client.pipeline()
+            for vid in video_ids:
+                pipe.zrem(recent_key, vid)
+            results = await pipe.execute()
+            # Count how many were actually removed (1 if existed, 0 if not)
+            videos_removed = sum(1 for r in results if r > 0)
+
+        # Delete tournament data and remove from registry using pipeline
+        pipe = client.pipeline()
+        pipe.delete(videos_key)
+        pipe.delete(meta_key)
+        pipe.zrem(registry_key, tournament_id)
+        await pipe.execute()
+
+        logger.info(
+            f"Deleted tournament {tournament_id} (was {status_before}), "
+            f"removed {videos_removed} videos from cooldown"
+        )
+
+        return {
+            "tournament_id": tournament_id,
+            "deleted": True,
+            "status_before_deletion": status_before,
+            "videos_removed_from_cooldown": videos_removed,
+            "message": f"Tournament deleted and {videos_removed} videos removed from cooldown"
         }
