@@ -67,6 +67,7 @@ from background_jobs import (
     send_metrics_to_gchat,
     send_error_alert_to_gchat,
     format_gchat_message,
+    sync_reported_nsfw_exclude_set,
 )
 from job_logger import get_job_logs, clear_job_logs, get_job_log_stats
 from metadata_handler import AsyncMetadataHandler
@@ -99,6 +100,7 @@ from config import (
     ADMIN_API_KEY,
     TOURNAMENT_VIDEO_POOL_SIZE,
     STUBBED_CANISTER_ID,
+    EXCLUDE_SYNC_INTERVAL,
 )
 
 # Configure logging
@@ -610,6 +612,29 @@ async def refresh_global_cache():
         # Don't raise - let scheduler retry at next interval
 
 
+async def sync_exclude_set():
+    """
+    Sync reported + NSFW videos exclude set from BigQuery to Redis.
+
+    This job runs every 5 minutes to keep the exclude set in sync with the
+    DAG-maintained BigQuery table (ds__reported_nsfw_videos).
+
+    Applies random jitter to prevent thundering herd when multiple workers
+    try to acquire the lock simultaneously.
+    """
+    jitter = random.randint(0, 30)
+    await asyncio.sleep(jitter)
+
+    if not os.getenv("SERVICE_CRED"):
+        logger.warning("SERVICE_CRED not set - skipping exclude set sync")
+        return
+
+    try:
+        await sync_reported_nsfw_exclude_set(redis_layer, kvrocks_service)
+    except Exception as e:
+        logger.error(f"Exclude set sync failed: {e}", exc_info=True)
+
+
 def job_listener(event):
     """Listen to job events for monitoring."""
     if event.exception:
@@ -706,6 +731,18 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=60,
     )
 
+    # Add exclude set sync job (every 5 minutes)
+    # Syncs reported + NSFW videos from BigQuery to Redis for filtering
+    scheduler.add_job(
+        sync_exclude_set,
+        "interval",
+        seconds=EXCLUDE_SYNC_INTERVAL,  # 5 minutes
+        id="sync_exclude_set",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+
     # Add Google Chat metrics job (production only)
     # Sends metrics summary at 9 AM, 3 PM, 9 PM IST (3:30, 9:30, 15:30 UTC)
     if GCHAT_WEBHOOK_URL:
@@ -744,6 +781,9 @@ async def lifespan(app: FastAPI):
         # Populate global cache on startup for instant /global-cache responses
         logger.info("Populating global cache on startup...")
         asyncio.create_task(refresh_global_cache())
+        # Sync exclude set (reported + NSFW videos) on startup
+        logger.info("Syncing exclude set on startup...")
+        asyncio.create_task(sync_exclude_set())
     else:
         logger.warning("SERVICE_CRED not set - BigQuery sync disabled")
 

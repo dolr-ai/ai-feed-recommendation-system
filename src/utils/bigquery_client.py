@@ -588,6 +588,37 @@ class BigQueryClient:
         logger.info(f"Fetching tournament-eligible videos with metadata (pool_size={limit})")
         return self._execute_query_with_retry(query)
 
+    def fetch_reported_nsfw_videos(self) -> pd.DataFrame:
+        """
+        Fetch all video_ids from the DAG-maintained excluded_videos table.
+
+        The DAG (ds__reported_nsfw_videos) maintains this table with videos that are:
+            - REPORTED + NOT CLEAN (probability >= 0.4 OR nsfw_ec != 'neutral')
+            - OR BANNED (video_report_banned event)
+
+        Algorithm:
+            1. SELECT all video_ids from yral_ds.excluded_videos
+            2. Return as DataFrame for sync to Redis exclude set
+
+        Returns:
+            DataFrame with column: video_id
+
+        Example:
+            >>> bq_client = BigQueryClient()
+            >>> df = bq_client.fetch_reported_nsfw_videos()
+            >>> print(df.head())
+               video_id
+            0  vid_001
+            1  vid_002
+        """
+        query = f"""
+        SELECT DISTINCT video_id
+        FROM `{self.project_id}.{self.dataset}.excluded_videos`
+        """
+
+        logger.info("Fetching excluded videos from DAG-maintained table")
+        return self._execute_query_with_retry(query)
+
     def _execute_query_with_retry(
         self,
         query: str,
