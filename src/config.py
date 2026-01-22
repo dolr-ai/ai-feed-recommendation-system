@@ -305,6 +305,20 @@ GCHAT_ALERT_MENTION = "<users/jay@gobazzinga.io>"  # User to mention on errors
 GCHAT_EXCLUDED_STATUS_CODES = {404}  # Client errors to exclude from alerts (noise)
 
 # ============================================================================
+# VIDEO EXCLUSION CONFIGURATION (Reported + NSFW)
+# ============================================================================
+
+# Sync interval for exclude set (5 minutes)
+EXCLUDE_SYNC_INTERVAL = 5 * 60  # 300 seconds
+
+# Redis key patterns for exclude set
+EXCLUDE_SET_KEY = "{GLOBAL}:exclude:reported_nsfw"
+EXCLUDE_SET_TEMP_KEY = "{GLOBAL}:exclude:reported_nsfw:temp"
+
+# BigQuery table (DAG-maintained)
+EXCLUDE_TABLE = "yral_ds.reported_nsfw_videos"
+
+# ============================================================================
 # MONITORING AND METRICS
 # ============================================================================
 

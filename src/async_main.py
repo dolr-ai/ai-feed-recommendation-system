@@ -83,6 +83,7 @@ from config import (
     TOURNAMENT_DURATION_SECONDS,
     TOURNAMENT_RETENTION_SECONDS,
     TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS,
+    EXCLUDE_SET_KEY,
 )
 
 # TTL safety margin (consider videos with < 1% TTL remaining as expired)
@@ -217,14 +218,15 @@ class AsyncLuaScripts:
         """
         Atomically fetch videos, remove from pool, and mark as consumed (cooldown).
 
-        EXACT SAME LUA SCRIPT AS SYNC VERSION - NO BUSINESS LOGIC CHANGE.
-
         This is THE core fetch operation that ensures:
         1. Pool is ALWAYS clean (sent videos removed immediately)
         2. Videos can never be sent twice (marked for cooldown atomically)
         3. Client doesn't need to call any other methods
 
-        Algorithm (UNCHANGED):
+        Note: Exclude set filtering (reported + NSFW) is done in Python after this
+        script returns, to avoid CROSSSLOT errors in cluster mode.
+
+        Algorithm:
         1. Cleanup expired from to_show, watched
         2. Fetch candidates from to_show (up to max_to_check)
         3. For each candidate:
@@ -825,6 +827,63 @@ class AsyncRedisLayer:
         return current
 
     # ------------------------------------------------------------------------
+    # Exclude Set Operations (Reported + NSFW filtering)
+    # ------------------------------------------------------------------------
+
+    async def _filter_excluded_videos(
+        self, video_ids: List[str]
+    ) -> Tuple[List[str], int]:
+        """
+        Filter out videos that are in the exclude set (reported + NSFW).
+
+        Uses SMISMEMBER for batch checking against the global exclude set.
+        This is done in Python (not Lua) to avoid CROSSSLOT errors in cluster mode,
+        since the exclude set uses {GLOBAL} hash tag while user keys use {user:ID}.
+
+        Algorithm:
+            1. Check if exclude set exists (fail open if not)
+            2. Use SMISMEMBER to batch-check all video_ids
+            3. Filter out videos that are in the exclude set
+            4. Return filtered list and count of excluded videos
+
+        Args:
+            video_ids: List of video IDs to filter
+
+        Returns:
+            Tuple of (filtered_video_ids, excluded_count)
+        """
+        if not video_ids:
+            return [], 0
+
+        try:
+            # Check if exclude set exists - fail open if not
+            exists = await self.db.exists(EXCLUDE_SET_KEY)
+            if not exists:
+                return video_ids, 0
+
+            # Batch check using SMISMEMBER (returns list of 0/1 for each video)
+            results = await self.client.smismember(EXCLUDE_SET_KEY, video_ids)
+
+            # Filter out excluded videos
+            filtered = []
+            excluded_count = 0
+            for video_id, is_excluded in zip(video_ids, results):
+                if is_excluded:
+                    excluded_count += 1
+                else:
+                    filtered.append(video_id)
+
+            if excluded_count > 0:
+                logger.debug(f"Filtered {excluded_count} excluded videos from {len(video_ids)} candidates")
+
+            return filtered, excluded_count
+
+        except Exception as e:
+            # Fail open - if exclude check fails, return all videos
+            logger.warning(f"Exclude set check failed, returning all videos: {e}")
+            return video_ids, 0
+
+    # ------------------------------------------------------------------------
     # Videos To Show Operations (MAIN OPERATIONS - ASYNC VERSIONS)
     # ------------------------------------------------------------------------
 
@@ -877,32 +936,58 @@ class AsyncRedisLayer:
         to_show_key = self._key_videos_to_show(user_id, rec_type)
         watched_key = self._key_watched_short_lived(user_id)
         bloom_key = self._key_bloom_permanent(user_id)
-        current_time = int(time.time())
+        max_to_check = min(count * 20, 10000)  # Buffer for watched/bloom filtering
 
-        # Initial fetch attempt + parallel count check (no added latency)
-        max_to_check = min(count * 10, 10000)  # Buffer for filtering
+        videos = []
+        total_removed = 0
+        total_filtered_watched = 0
+        total_filtered_bloom = 0
+        total_filtered_exclude = 0
 
-        # Run fetch and count in parallel
-        fetch_task = self.scripts._execute_script(
-            self.scripts.fetch_and_consume,
-            "fetch_and_consume",
-            keys=[to_show_key, watched_key, bloom_key],
-            args=[current_time, count, max_to_check, TTL_WATCHED_SET],
-            semaphore=self.redis_semaphore,
-        )
-        count_task = self.count_valid_videos_to_show(user_id, rec_type)
+        # Fetch with retry loop to handle exclude filtering reducing count
+        # Max 3 quick retries before falling back to auto-refill
+        for fetch_attempt in range(3):
+            needed = count - len(videos)
+            if needed <= 0:
+                break
 
-        # Wait for both to complete
-        result, valid_count_in_pool = await asyncio.gather(fetch_task, count_task)
+            # Request extra to account for exclude filtering (50% buffer)
+            fetch_count = int(needed * 1.5) + 10
+            current_time = int(time.time())
 
-        videos = result[0]
-        removed_from_pool = result[1]
-        filtered_watched = result[2]
-        filtered_bloom = result[3]
+            result = await self.scripts._execute_script(
+                self.scripts.fetch_and_consume,
+                "fetch_and_consume",
+                keys=[to_show_key, watched_key, bloom_key],
+                args=[current_time, fetch_count, max_to_check, TTL_WATCHED_SET],
+                semaphore=self.redis_semaphore,
+            )
+
+            batch_videos = result[0]
+            total_removed += result[1]
+            total_filtered_watched += result[2]
+            total_filtered_bloom += result[3]
+
+            if not batch_videos:
+                # Pool exhausted, break to trigger auto-refill
+                break
+
+            # Filter out excluded videos (reported + NSFW) - done in Python to avoid CROSSSLOT
+            batch_videos, batch_excluded = await self._filter_excluded_videos(batch_videos)
+            total_filtered_exclude += batch_excluded
+
+            videos.extend(batch_videos)
+
+            # If no videos were excluded this batch, pool is clean - no need to retry
+            if batch_excluded == 0:
+                break
+
+        # Get pool count for logging and refill decision
+        valid_count_in_pool = await self.count_valid_videos_to_show(user_id, rec_type)
 
         logger.info(
             f"Fetched {len(videos)}/{count} videos for {user_id}:{rec_type} "
-            f"(removed={removed_from_pool}, filtered_w={filtered_watched}, filtered_b={filtered_bloom}), "
+            f"(removed={total_removed}, filtered_w={total_filtered_watched}, filtered_b={total_filtered_bloom}, filtered_ex={total_filtered_exclude}), "
             f"pool has {valid_count_in_pool} valid videos"
         )
 
@@ -955,17 +1040,24 @@ class AsyncRedisLayer:
 
                 # Retry fetch after refill
                 current_time = int(time.time())
+                needed = count - len(videos) + 10  # Extra buffer for exclude filtering
                 result = await self.scripts._execute_script(
                     self.scripts.fetch_and_consume,
                     "fetch_and_consume",
                     keys=[to_show_key, watched_key, bloom_key],
-                    args=[current_time, count - len(videos), max_to_check, TTL_WATCHED_SET],
+                    args=[current_time, needed, max_to_check, TTL_WATCHED_SET],
                     semaphore=self.redis_semaphore,
                 )
 
                 new_videos = result[0]
                 removed = result[1]
-                logger.info(f"Refill attempt {attempt}: fetched {len(new_videos)} additional videos (removed={removed})")
+
+                # Filter excluded videos
+                new_filtered_exclude = 0
+                if new_videos:
+                    new_videos, new_filtered_exclude = await self._filter_excluded_videos(new_videos)
+
+                logger.info(f"Refill attempt {attempt}: fetched {len(new_videos)} additional videos (removed={removed}, filtered_ex={new_filtered_exclude})")
 
                 videos.extend(new_videos)
 
@@ -983,15 +1075,22 @@ class AsyncRedisLayer:
                     await self.refill_with_fallback(user_id, target=REFILL_THRESHOLD)
                     fallback_key = self._key_videos_to_show(user_id, "fallback")
                     current_time = int(time.time())
+                    needed = count - len(videos) + 10  # Extra buffer for exclude filtering
                     result = await self.scripts._execute_script(
                         self.scripts.fetch_and_consume,
                         "fetch_and_consume",
                         keys=[fallback_key, watched_key, bloom_key],
-                        args=[current_time, count - len(videos), max_to_check, TTL_WATCHED_SET],
+                        args=[current_time, needed, max_to_check, TTL_WATCHED_SET],
                         semaphore=self.redis_semaphore,
                     )
                     fallback_videos = result[0]
-                    logger.info(f"Fetched {len(fallback_videos)} from fallback")
+
+                    # Filter excluded videos
+                    fallback_filtered_exclude = 0
+                    if fallback_videos:
+                        fallback_videos, fallback_filtered_exclude = await self._filter_excluded_videos(fallback_videos)
+
+                    logger.info(f"Fetched {len(fallback_videos)} from fallback (filtered_ex={fallback_filtered_exclude})")
                     videos.extend(fallback_videos)
                 except Exception as e:
                     logger.error(f"Fallback fetch failed: {e}")

@@ -42,6 +42,8 @@ from config import (
     UGC_POOL_CAPACITY,
     GCHAT_WEBHOOK_URL,
     GCHAT_ALERT_MENTION,
+    EXCLUDE_SET_KEY,
+    EXCLUDE_SET_TEMP_KEY,
 )
 from utils.metrics_utils import hourly_metrics
 
@@ -687,7 +689,91 @@ async def sync_ugc_pool(
 
 
 # ============================================================================
-# SYNC JOB 6: GOOGLE CHAT METRICS WEBHOOK
+# SYNC JOB 6: REPORTED NSFW EXCLUDE SET
+# ============================================================================
+
+async def sync_reported_nsfw_exclude_set(
+    redis_layer: AsyncRedisLayer,
+    kvrocks_service: AsyncKVRocksService
+) -> None:
+    """
+    Sync reported + NSFW videos from DAG-maintained BigQuery table to Redis.
+
+    Uses FULL REFRESH pattern (DAG handles incremental logic):
+    1. Query BigQuery for all video_ids in reported_nsfw_videos table
+    2. Atomic swap: write to temp key, then RENAME to final key
+    3. This ensures the Redis SET always matches the BQ table
+
+    Algorithm:
+        1. Acquire distributed lock for 'exclude_sync' job
+        2. Query BigQuery for all excluded video_ids
+        3. Write to temp key using SADD in batches
+        4. RENAME temp key to final key (atomic swap)
+        5. Release lock
+
+    Args:
+        redis_layer: AsyncRedisLayer instance (for pattern compliance, not used directly)
+        kvrocks_service: AsyncKVRocksService instance for Redis operations
+    """
+    job_name = "exclude_sync"
+    start_time = time.time()
+
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
+
+    if not await acquire_job_lock(kvrocks_service.client, job_name, ttl=300):
+        job_logger.info(f"Skipping {job_name} - another worker is handling it")
+        return
+
+    try:
+        job_logger.info("Starting exclude set sync from BigQuery...")
+
+        # Initialize BigQuery client
+        bq_client = BigQueryClient()
+
+        # Fetch all excluded video_ids from DAG-maintained table
+        df = bq_client.fetch_reported_nsfw_videos()
+
+        exclude_key = EXCLUDE_SET_KEY
+        temp_key = EXCLUDE_SET_TEMP_KEY
+
+        if df.empty:
+            job_logger.info("No reported + NSFW videos to exclude, clearing set")
+            await kvrocks_service.client.delete(exclude_key)
+            return
+
+        video_ids = df['video_id'].tolist()
+        job_logger.info(f"Found {len(video_ids)} videos to exclude")
+
+        # Delete temp key if exists (from failed previous run)
+        await kvrocks_service.client.delete(temp_key)
+
+        # SADD to temp key in batches
+        for batch in _batch_list(video_ids, BQ_PIPELINE_SIZE):
+            await kvrocks_service.client.sadd(temp_key, *batch)
+
+        # Atomic swap: RENAME temp to final
+        await kvrocks_service.client.rename(temp_key, exclude_key)
+
+        elapsed = time.time() - start_time
+        job_logger.info(
+            f"Exclude sync completed: {len(video_ids)} videos in {elapsed:.2f}s"
+        )
+
+    except Exception as e:
+        job_logger.error(f"Error in exclude sync: {e}", exc_info=True)
+        # Cleanup temp key on failure
+        try:
+            await kvrocks_service.client.delete(temp_key)
+        except Exception:
+            pass
+        raise
+
+    finally:
+        await release_job_lock(kvrocks_service.client, job_name)
+
+
+# ============================================================================
+# SYNC JOB 7: GOOGLE CHAT METRICS WEBHOOK
 # ============================================================================
 
 async def send_metrics_to_gchat(
