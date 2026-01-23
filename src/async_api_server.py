@@ -25,6 +25,8 @@ import sentry_sdk
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
+from utils.common_utils import filter_transient_errors
+
 # Initialize Sentry before FastAPI app
 sentry_sdk.init(
     dsn=os.getenv(
@@ -42,6 +44,7 @@ sentry_sdk.init(
         StarletteIntegration(),
         FastApiIntegration(),
     ],
+    before_send=filter_transient_errors,
 )
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Header, Depends
