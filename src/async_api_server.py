@@ -26,6 +26,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from utils.common_utils import filter_transient_errors
+from pyinstrument import Profiler
 
 # Initialize Sentry before FastAPI app
 sentry_sdk.init(
@@ -67,6 +68,7 @@ from background_jobs import (
     sync_freshness_windows,
     sync_user_bloom_filters,
     sync_ugc_pool,
+    sync_ugc_discovery_pool,
     send_metrics_to_gchat,
     send_error_alert_to_gchat,
     format_gchat_message,
@@ -104,6 +106,7 @@ from config import (
     TOURNAMENT_VIDEO_POOL_SIZE,
     STUBBED_CANISTER_ID,
     EXCLUDE_SYNC_INTERVAL,
+    UGC_DISCOVERY_SYNC_INTERVAL,
 )
 
 # Configure logging
@@ -638,6 +641,26 @@ async def sync_exclude_set():
         logger.error(f"Exclude set sync failed: {e}", exc_info=True)
 
 
+async def sync_ugc_discovery():
+    """
+    Sync UGC Discovery Pool from BigQuery to Redis.
+
+    Applies random jitter to prevent thundering herd when multiple workers
+    try to acquire the lock simultaneously.
+    """
+    jitter = random.randint(0, 60)
+    await asyncio.sleep(jitter)
+
+    if not os.getenv("SERVICE_CRED"):
+        logger.warning("SERVICE_CRED not set - skipping UGC discovery sync")
+        return
+
+    try:
+        await sync_ugc_discovery_pool(redis_layer, kvrocks_service)
+    except Exception as e:
+        logger.error(f"UGC discovery sync failed: {e}", exc_info=True)
+
+
 def job_listener(event):
     """Listen to job events for monitoring."""
     if event.exception:
@@ -746,8 +769,16 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=60,
     )
 
-    # Add Google Chat metrics job (production only)
-    # Sends metrics summary at 9 AM, 3 PM, 9 PM IST (3:30, 9:30, 15:30 UTC)
+    scheduler.add_job(
+        sync_ugc_discovery,
+        "interval",
+        seconds=UGC_DISCOVERY_SYNC_INTERVAL,  # 30 minutes
+        id="sync_ugc_discovery",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+
     if GCHAT_WEBHOOK_URL:
         scheduler.add_job(
             send_gchat_metrics_report,
@@ -787,6 +818,9 @@ async def lifespan(app: FastAPI):
         # Sync exclude set (reported + NSFW videos) on startup
         logger.info("Syncing exclude set on startup...")
         asyncio.create_task(sync_exclude_set())
+        # Sync UGC Discovery Pool on startup for fresh video discovery
+        logger.info("Syncing UGC discovery pool on startup...")
+        asyncio.create_task(sync_ugc_discovery())
     else:
         logger.warning("SERVICE_CRED not set - BigQuery sync disabled")
 
@@ -971,6 +1005,8 @@ async def get_recommendations_with_metadata_v2(
     rec_type: str = Query(
         default="mixed", description="Type: mixed, popularity, freshness"
     ),
+    profile: bool = Query(default=False, description="Enable profiling output"),
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
 ):
     """
     ASYNC - Get personalized video recommendations with metadata and view counts (V2).
@@ -982,6 +1018,14 @@ async def get_recommendations_with_metadata_v2(
 
     This is the V2 version that includes view counts from redis-impressions.
     """
+    # Start profiler if requested (requires admin key)
+    profiler = None
+    if profile:
+        if not x_admin_key or x_admin_key != ADMIN_API_KEY:
+            raise HTTPException(status_code=403, detail="Admin key required for profiling")
+        profiler = Profiler(async_mode="enabled")
+        profiler.start()
+
     try:
         # Attach user context to Sentry for Release Health tracking
         sentry_sdk.set_user({"id": str(user_id)})
@@ -999,7 +1043,7 @@ async def get_recommendations_with_metadata_v2(
 
         video_metadata = await metadata_handler.batch_convert_video_ids_v2(videos)
 
-        return RecommendationWithMetadataV2Response(
+        response = RecommendationWithMetadataV2Response(
             user_id=user_id,
             videos=video_metadata,
             count=len(video_metadata),
@@ -1007,7 +1051,19 @@ async def get_recommendations_with_metadata_v2(
             timestamp=int(time.time()),
         )
 
+        # Print profiler output if enabled
+        if profiler:
+            profiler.stop()
+            print("\n" + "="*80)
+            print(f"PROFILE: /v2/recommend-with-metadata/{user_id}?count={count}")
+            print("="*80)
+            print(profiler.output_text(unicode=True, color=True))
+
+        return response
+
     except Exception as e:
+        if profiler:
+            profiler.stop()
         logger.error(
             f"Error getting recommendations with metadata v2 for {user_id}: {e}"
         )

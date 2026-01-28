@@ -104,7 +104,7 @@ class BigQueryClient:
             -- Start with video_unique as source of truth
             -- ugc_content_approval acts as override: is_approved=FALSE excludes video from ALL sources
             SELECT DISTINCT vu.video_id
-            FROM `{self.project_id}.{self.dataset}.video_unique` vu
+            FROM `{self.project_id}.{self.dataset}.video_unique_v2` vu
             LEFT JOIN `{self.project_id}.{self.dataset}.ai_ugc` aug
                 ON vu.video_id = aug.video_id
             LEFT JOIN `{self.project_id}.{self.dataset}.bot_uploaded_content` buc
@@ -205,7 +205,7 @@ class BigQueryClient:
             SELECT
                 vu.video_id,
                 MAX(vt.ts) as ts
-            FROM `{self.project_id}.{self.dataset}.video_unique` vu
+            FROM `{self.project_id}.{self.dataset}.video_unique_v2` vu
             INNER JOIN video_timestamps vt
                 ON vu.video_id = vt.video_id
             LEFT JOIN rejected_videos rv
@@ -272,7 +272,7 @@ class BigQueryClient:
             -- Get all valid videos from video_unique
             -- ugc_content_approval acts as override: is_approved=FALSE excludes video from ALL sources
             SELECT DISTINCT vu.video_id
-            FROM `{self.project_id}.{self.dataset}.video_unique` vu
+            FROM `{self.project_id}.{self.dataset}.video_unique_v2` vu
             LEFT JOIN `{self.project_id}.{self.dataset}.ai_ugc` aug
                 ON vu.video_id = aug.video_id
             LEFT JOIN `{self.project_id}.{self.dataset}.bot_uploaded_content` buc
@@ -352,7 +352,7 @@ class BigQueryClient:
             aug.video_id,
             aug.upload_timestamp AS created_at
         FROM `{self.project_id}.{self.dataset}.ai_ugc` aug
-        INNER JOIN `{self.project_id}.{self.dataset}.video_unique` vu
+        INNER JOIN `{self.project_id}.{self.dataset}.video_unique_v2` vu
             ON aug.video_id = vu.video_id
         LEFT JOIN rejected_videos rv
             ON aug.video_id = rv.video_id
@@ -367,6 +367,88 @@ class BigQueryClient:
             query += f" LIMIT {limit}"
 
         logger.info(f"Fetching UGC videos from BigQuery (limit={limit})")
+        return self._execute_query_with_retry(query)
+
+    def fetch_ugc_discovery_videos(self, max_views: int = 200, max_age_days: int = 7) -> pd.DataFrame:
+        """
+        Fetch UGC videos eligible for the Discovery Pool.
+
+        The Discovery Pool prioritizes NEW videos with LOW impressions to ensure
+        fresh user-generated content gets discovered. This replaces the random
+        ZRANDMEMBER sampling that favored older videos.
+
+        Algorithm:
+            1. UNION two content sources:
+               a. ai_ugc - AI-generated content
+               b. ugc_content_approval (is_approved=TRUE) - User-uploaded approved content
+            2. Join with video_unique_v2 (actively maintained, deduplicates content)
+            3. Left join video_statistics to get impression counts
+            4. Filter to videos from last max_age_days with < max_views impressions
+            5. Return video_id, upload_timestamp, impression_count
+            6. Order by upload_timestamp DESC (freshest first)
+
+        Args:
+            max_views: Maximum impression count for eligibility (default: 200)
+            max_age_days: Maximum age in days for eligibility (default: 7)
+
+        Returns:
+            DataFrame with columns:
+                - video_id (STRING): The video identifier
+                - upload_timestamp (TIMESTAMP): When the video was uploaded
+                - impression_count (INT64): Total impressions (0 if not in video_statistics)
+
+        Example:
+            >>> bq_client = BigQueryClient()
+            >>> df = bq_client.fetch_ugc_discovery_videos(max_views=200, max_age_days=7)
+            >>> print(df.head())
+               video_id              upload_timestamp  impression_count
+            0  vid_001   2024-12-04 10:30:00+00:00                  42
+            1  vid_002   2024-12-04 09:15:00+00:00                   0
+        """
+        query = f"""
+        WITH ugc_sources AS (
+            -- Source 1: AI-generated content
+            SELECT DISTINCT
+                video_id,
+                upload_timestamp
+            FROM `{self.project_id}.{self.dataset}.ai_ugc`
+            WHERE upload_timestamp IS NOT NULL
+              AND publisher_user_id IS NOT NULL
+
+            UNION DISTINCT
+
+            -- Source 2: User-uploaded approved content
+            SELECT DISTINCT
+                video_id,
+                created_at AS upload_timestamp
+            FROM `{self.project_id}.{self.dataset}.ugc_content_approval`
+            WHERE is_approved = TRUE
+              AND created_at IS NOT NULL
+        )
+        SELECT DISTINCT
+            us.video_id,
+            us.upload_timestamp,
+            COALESCE(vs.total_impressions, 0) AS impression_count
+        FROM ugc_sources us
+        INNER JOIN `{self.project_id}.{self.dataset}.video_unique_v2` vu
+            ON us.video_id = vu.video_id
+        LEFT JOIN `{self.project_id}.{self.dataset}.video_statistics` vs
+            ON us.video_id = vs.video_id
+        WHERE us.upload_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {max_age_days} DAY)
+          AND COALESCE(vs.total_impressions, 0) < {max_views}
+        ORDER BY us.upload_timestamp DESC
+        """
+
+        logger.info(
+            f"Fetching UGC discovery videos from BigQuery "
+            f"(max_views={max_views}, max_age_days={max_age_days})"
+        )
+        print(f"""
+        ============================
+        UGC QUERY:
+        {query}
+        ============================
+        """)
         return self._execute_query_with_retry(query)
 
     def fetch_followed_users_content(
@@ -466,7 +548,7 @@ class BigQueryClient:
                 fc.publisher_user_id,
                 MAX(fc.upload_time) AS upload_time
             FROM followed_content fc
-            INNER JOIN `{self.project_id}.{self.dataset}.video_unique` vu
+            INNER JOIN `{self.project_id}.{self.dataset}.video_unique_v2` vu
                 ON fc.video_id = vu.video_id
             LEFT JOIN `{self.project_id}.{self.dataset}.ugc_content_approval` uca
                 ON fc.video_id = uca.video_id

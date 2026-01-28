@@ -689,7 +689,184 @@ async def sync_ugc_pool(
 
 
 # ============================================================================
-# SYNC JOB 6: REPORTED NSFW EXCLUDE SET
+# SYNC JOB 6: UGC DISCOVERY POOL (Priority-based, 30-minute refresh)
+# ============================================================================
+
+async def sync_ugc_discovery_pool(
+    redis_layer: AsyncRedisLayer,
+    kvrocks_service: AsyncKVRocksService
+) -> None:
+    """
+    Sync UGC Discovery Pool from BigQuery - prioritizes NEW videos with LOW impressions.
+
+    This pool replaces random ZRANDMEMBER sampling with priority-based discovery
+    to ensure fresh uploads get discovered. Refreshes every 30 minutes.
+
+    Data Structures:
+        - {GLOBAL}:pool:ugc_discovery (ZSET): video_id -> expiry_timestamp
+        - {GLOBAL}:ugc_discovery:timestamps (HASH): video_id -> upload_timestamp
+        - {GLOBAL}:ugc_discovery:pushes (HASH): video_id -> push_count (persisted)
+
+    Algorithm:
+        1. Acquire distributed lock for 'ugc_discovery_sync' job
+        2. Fetch eligible videos from BigQuery (< 200 impressions, last 7 days)
+        3. Filter videos with metadata in KVRocks (offchain:metadata check)
+        4. Get existing push counts from HASH (preserve for returning videos)
+        5. Atomic update via pipeline:
+           - Clear old pool and timestamps
+           - Add new videos with expiry scores
+           - Set timestamps for all videos
+           - Initialize push counts for NEW videos only (0)
+           - Clean stale entries from push counts HASH
+        6. Release lock
+
+    Args:
+        redis_layer: AsyncRedisLayer instance for key generation
+        kvrocks_service: AsyncKVRocksService instance for Redis operations
+    """
+    from config import (
+        UGC_DISCOVERY_MAX_VIEWS,
+        UGC_DISCOVERY_MAX_AGE_DAYS,
+        UGC_DISCOVERY_POOL_CAPACITY,
+        TTL_UGC_USER_POOL,
+    )
+
+    job_name = "ugc_discovery_sync"
+    start_time = time.time()
+
+    job_logger = get_job_logger(job_name, kvrocks_service.client)
+
+    if not await acquire_job_lock(kvrocks_service.client, job_name, ttl=600):
+        job_logger.info(f"Skipping {job_name} - another worker is handling it")
+        return
+
+    try:
+        job_logger.info("Starting UGC Discovery Pool sync from BigQuery...")
+
+        # Key names for UGC discovery pool
+        pool_key = "{GLOBAL}:pool:ugc_discovery"
+        timestamps_key = "{GLOBAL}:ugc_discovery:timestamps"
+        pushes_key = "{GLOBAL}:ugc_discovery:pushes"
+
+        # Initialize BigQuery client
+        bq_client = BigQueryClient()
+
+        # Fetch eligible videos (< 200 impressions, last 7 days, validated via video_unique_v2)
+        job_logger.info(
+            f"Fetching UGC discovery videos (max_views={UGC_DISCOVERY_MAX_VIEWS}, "
+            f"max_age_days={UGC_DISCOVERY_MAX_AGE_DAYS})..."
+        )
+        df = bq_client.fetch_ugc_discovery_videos(
+            max_views=UGC_DISCOVERY_MAX_VIEWS,
+            max_age_days=UGC_DISCOVERY_MAX_AGE_DAYS
+        )
+
+        if df.empty:
+            job_logger.warning("No UGC discovery videos fetched from BigQuery")
+            return
+
+        job_logger.info(f"Fetched {len(df)} eligible videos from BigQuery")
+
+        # Filter videos with metadata in KVRocks
+        video_ids = df['video_id'].tolist()
+        video_ids_with_metadata = await filter_videos_with_metadata(
+            video_ids, kvrocks_service.client, job_logger
+        )
+
+        if not video_ids_with_metadata:
+            job_logger.warning("No UGC discovery videos with metadata in KVRocks")
+            return
+
+        # Create lookup for filtered videos (to get timestamps later)
+        valid_video_set = set(video_ids_with_metadata)
+        filtered_df = df[df['video_id'].isin(valid_video_set)]
+
+        job_logger.info(f"After metadata filter: {len(filtered_df)} videos")
+
+        # Limit to pool capacity
+        if len(filtered_df) > UGC_DISCOVERY_POOL_CAPACITY:
+            filtered_df = filtered_df.head(UGC_DISCOVERY_POOL_CAPACITY)
+            job_logger.info(f"Capped to pool capacity: {UGC_DISCOVERY_POOL_CAPACITY}")
+
+        # Get existing push counts to preserve them
+        existing_push_counts = {}
+        try:
+            raw_pushes = await kvrocks_service.client.hgetall(pushes_key)
+            if raw_pushes:
+                for k, v in raw_pushes.items():
+                    key_str = k.decode('utf-8') if isinstance(k, bytes) else k
+                    val_str = v.decode('utf-8') if isinstance(v, bytes) else v
+                    try:
+                        existing_push_counts[key_str] = int(val_str)
+                    except (ValueError, TypeError):
+                        existing_push_counts[key_str] = 0
+            job_logger.info(f"Preserved {len(existing_push_counts)} existing push counts")
+        except Exception as e:
+            job_logger.warning(f"Could not fetch existing push counts: {e}")
+
+        # Prepare data for atomic update
+        now = int(time.time())
+        # TTL for pool entries: use a longer TTL since we refresh every 30 minutes
+        # 2 hours gives buffer for missed syncs
+        pool_ttl = 2 * 60 * 60
+        expiry = now + pool_ttl
+
+        new_video_ids = set(filtered_df['video_id'].tolist())
+
+        # Atomic update via pipeline
+        pipe = kvrocks_service.client.pipeline()
+
+        # Clear old pool and timestamps (but NOT pushes - we preserve those)
+        pipe.delete(pool_key)
+        pipe.delete(timestamps_key)
+
+        # Add new videos to pool and timestamps
+        for _, row in filtered_df.iterrows():
+            vid = row['video_id']
+            upload_ts = row['upload_timestamp']
+
+            # Convert timestamp to unix epoch
+            if hasattr(upload_ts, 'timestamp'):
+                ts_int = int(upload_ts.timestamp())
+            else:
+                ts_int = int(upload_ts)
+
+            # Add to pool ZSET (score = expiry timestamp)
+            pipe.zadd(pool_key, {vid: float(expiry)})
+
+            # Add to timestamps HASH
+            pipe.hset(timestamps_key, vid, ts_int)
+
+            # Initialize push count for NEW videos only
+            if vid not in existing_push_counts:
+                pipe.hset(pushes_key, vid, 0)
+
+        # Clean stale entries from push counts (videos no longer in pool)
+        stale_video_ids = set(existing_push_counts.keys()) - new_video_ids
+        if stale_video_ids:
+            for stale_vid in stale_video_ids:
+                pipe.hdel(pushes_key, stale_vid)
+            job_logger.info(f"Cleaning {len(stale_video_ids)} stale push count entries")
+
+        await pipe.execute()
+
+        elapsed = time.time() - start_time
+        preserved_count = len(new_video_ids & set(existing_push_counts.keys()))
+        job_logger.info(
+            f"UGC Discovery sync completed: {len(filtered_df)} videos in {elapsed:.2f}s "
+            f"(preserved {preserved_count} push counts, cleaned {len(stale_video_ids)} stale)"
+        )
+
+    except Exception as e:
+        job_logger.error(f"Error in UGC Discovery sync: {e}", exc_info=True)
+        raise
+
+    finally:
+        await release_job_lock(kvrocks_service.client, job_name)
+
+
+# ============================================================================
+# SYNC JOB 7: REPORTED NSFW EXCLUDE SET
 # ============================================================================
 
 async def sync_reported_nsfw_exclude_set(
