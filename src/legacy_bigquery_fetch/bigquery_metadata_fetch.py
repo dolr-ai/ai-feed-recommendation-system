@@ -55,7 +55,7 @@ def _init_bigquery():
     # AI UGC table (fixed, not configurable via env)
     ai_ugc_table = "hot-or-not-feed-intelligence.yral_ds.ai_ugc"
     # Video unique table (required for all videos)
-    video_unique_table = "hot-or-not-feed-intelligence.yral_ds.video_unique"
+    video_unique_table = "hot-or-not-feed-intelligence.yral_ds.video_unique_v2"
 
     return bq_client, video_table, ai_ugc_table, video_unique_table
 
@@ -196,7 +196,7 @@ def _fetch_from_bigquery(
         pd.post_id,
         pd.publisher_user_id
     FROM prioritized_data pd
-    INNER JOIN `hot-or-not-feed-intelligence.yral_ds.video_unique` vu
+    INNER JOIN `hot-or-not-feed-intelligence.yral_ds.video_unique_v2` vu
         ON pd.video_id = vu.video_id
     WHERE pd.rn = 1
     """

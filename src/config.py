@@ -144,7 +144,7 @@ FALLBACK_RATIOS = {
 # UGC (USER-GENERATED CONTENT) CONFIGURATION
 # ============================================================================
 
-# UGC mixing ratio - 5% of non-following slots reserved for UGC content
+# UGC mixing ratio - 30% of non-following slots reserved for UGC content
 # This promotes content from real platform users (ai_ugc + ugc_content_approval)
 UGC_RATIO = 0.30  # 30% of remaining slots after following
 
@@ -153,6 +153,35 @@ TTL_UGC_VIDEOS = 3 * 24 * 60 * 60  # 3 days
 
 # Maximum UGC videos to keep in global pool
 UGC_POOL_CAPACITY = 10000  # 10K videos, ordered by freshness
+
+# ============================================================================
+# UGC DISCOVERY POOL CONFIGURATION
+# ============================================================================
+# UGC Discovery Pool prioritizes NEW uploads with LOW impressions to ensure
+# fresh content gets discovered. Uses priority formula:
+#   priority = upload_timestamp - (push_count * PUSH_PENALTY_SECONDS)
+
+# Videos must have fewer than this many impressions to be eligible
+UGC_DISCOVERY_MAX_VIEWS = 200
+
+# Videos must be uploaded within this many days
+UGC_DISCOVERY_MAX_AGE_DAYS = 7
+
+# How often to refresh the discovery pool from BigQuery (30 minutes)
+UGC_DISCOVERY_SYNC_INTERVAL = 30 * 60  # 1800 seconds
+
+# Push penalty: Each push (serve to user) reduces priority by this many seconds
+# 3600 = 1 hour per push. A video pushed 5 times loses 5 hours of "freshness"
+UGC_DISCOVERY_PUSH_PENALTY = 3600
+
+# Maximum videos in the global discovery pool
+UGC_DISCOVERY_POOL_CAPACITY = 5000
+
+# User UGC pool TTL - SHORT to ensure freshness
+# Global pool refreshes every 30 minutes with fresh videos
+# User pool expires after 1 hour, forcing refill from fresh global pool
+# This ensures users always get recent UGC content, not stale videos
+TTL_UGC_USER_POOL = 1 * 60 * 60  # 1 hour (vs 3 days for other pools)
 
 # ============================================================================
 # FOLLOWING CONTENT CONFIGURATION

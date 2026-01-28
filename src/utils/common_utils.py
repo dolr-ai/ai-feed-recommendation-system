@@ -59,3 +59,42 @@ def path_exists(path: Union[pathlib.Path, str]) -> bool:
 
     path_obj = pathlib.Path(path) if isinstance(path, str) else path
     return path_obj.exists()
+
+
+def filter_transient_errors(event, hint):
+    """
+    Sentry before_send hook to filter out known transient errors.
+
+    Algorithm:
+        1. Check if the hint contains exception info
+        2. If so, extract the exception type and message
+        3. Filter out known transient errors:
+           - TimeoutError: Redis connection timeouts during high load
+           - Refill lock conflicts: Concurrent request race condition
+           - Bloom filter race: Key already exists during initialization
+        4. Return None to drop the event, or the event to send it
+
+    Args:
+        event: Sentry event dict containing error details
+        hint: Dict containing exc_info tuple (type, value, traceback)
+
+    Returns:
+        event dict if error should be sent to Sentry, None to drop it
+    """
+    if "exc_info" in hint:
+        exc_type, exc_value, _ = hint["exc_info"]
+        error_message = str(exc_value).lower()
+
+        # Filter timeout errors (Redis connection timeouts)
+        if exc_type.__name__ == "TimeoutError":
+            return None
+
+        # Filter refill lock conflicts (concurrent request race condition)
+        if "refill lock already held" in error_message:
+            return None
+
+        # Filter bloom filter race condition (key already exists)
+        if "key already exists" in error_message:
+            return None
+
+    return event

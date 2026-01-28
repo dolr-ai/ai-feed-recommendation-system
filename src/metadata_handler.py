@@ -147,7 +147,7 @@ class AsyncMetadataHandler:
 
         try:
             self.redis_impressions_client.ping()
-        except redis.ConnectionError:
+        except (redis.ConnectionError, redis.TimeoutError):
             self.redis_impressions_client = None
 
     def get_video_view_counts_from_redis_impressions(

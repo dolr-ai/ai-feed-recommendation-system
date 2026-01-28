@@ -48,7 +48,7 @@ class AsyncKVRocksService:
         instance_id: Optional[str] = None,
         max_connections: int = None,
         min_idle_connections: int = 10,
-        socket_connect_timeout: int = 5,
+        socket_connect_timeout: int = 15,
         socket_timeout: int = 60,
         decode_responses: bool = True,
         ssl_enabled: bool = False,
@@ -68,7 +68,7 @@ class AsyncKVRocksService:
             instance_id: Instance identifier for logging
             max_connections: Maximum connections in pool (default: 100)
             min_idle_connections: Minimum idle connections to maintain (default: 10)
-            socket_connect_timeout: Connection timeout in seconds (default: 5)
+            socket_connect_timeout: Connection timeout in seconds (default: 15)
             socket_timeout: Socket timeout in seconds (default: 10)
             decode_responses: Decode responses to strings (default: True)
             ssl_enabled: Enable TLS/SSL (default: False)

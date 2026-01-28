@@ -32,6 +32,7 @@ import random
 import json
 import logging
 import asyncio
+import traceback
 from typing import List, Dict, Tuple, Optional, Any, Union
 from utils.async_redis_utils import AsyncKVRocksService
 
@@ -84,6 +85,9 @@ from config import (
     TOURNAMENT_RETENTION_SECONDS,
     TOURNAMENT_VIDEO_REUSE_COOLDOWN_SECONDS,
     EXCLUDE_SET_KEY,
+    # UGC Discovery Pool config
+    UGC_DISCOVERY_PUSH_PENALTY,
+    TTL_UGC_USER_POOL,
 )
 
 # TTL safety margin (consider videos with < 1% TTL remaining as expired)
@@ -584,6 +588,18 @@ class AsyncRedisLayer:
         """Generate key for global UGC (User-Generated Content) ZSET. Uses {GLOBAL} hash tag."""
         return "{GLOBAL}:pool:ugc"
 
+    def _key_global_ugc_discovery_zset(self) -> str:
+        """Generate key for global UGC Discovery Pool ZSET. Uses {GLOBAL} hash tag."""
+        return "{GLOBAL}:pool:ugc_discovery"
+
+    def _key_global_ugc_discovery_pushes(self) -> str:
+        """Generate key for UGC Discovery push counts HASH. Uses {GLOBAL} hash tag."""
+        return "{GLOBAL}:ugc_discovery:pushes"
+
+    def _key_global_ugc_discovery_timestamps(self) -> str:
+        """Generate key for UGC Discovery upload timestamps HASH. Uses {GLOBAL} hash tag."""
+        return "{GLOBAL}:ugc_discovery:timestamps"
+
     def _key_pop_percentile_pointer(self, user_id: str) -> str:
         """Pointer key for user's popularity percentile bucket. Uses hash tag for cluster."""
         return f"{{user:{user_id}}}:pop_percentile_pointer"
@@ -884,6 +900,49 @@ class AsyncRedisLayer:
             return video_ids, 0
 
     # ------------------------------------------------------------------------
+    # UGC Discovery Push Count Tracking
+    # ------------------------------------------------------------------------
+
+    async def _increment_ugc_push_counts(self, video_ids: List[str]) -> None:
+        """
+        Atomically increment push counts for UGC videos SERVED to users.
+
+        This is called at FETCH TIME (after fetch_and_consume Lua returns videos)
+        to ensure push_count reflects actual impressions (videos delivered to users),
+        not potential impressions (videos added to pools).
+
+        Algorithm:
+            1. Use Redis HINCRBY (atomic at Redis level - serialized per key)
+            2. Pipeline multiple increments for efficiency
+            3. Fire-and-forget - don't block on result
+
+        Thread-safe: YES
+            - Redis HINCRBY is atomic per field
+            - Pipeline batches execute atomically
+            - No race conditions between workers
+
+        Args:
+            video_ids: List of video IDs actually served to the user
+        """
+        if not video_ids:
+            return
+
+        pushes_key = self._key_global_ugc_discovery_pushes()
+
+        try:
+            pipe = self.client.pipeline()
+            for vid in video_ids:
+                pipe.hincrby(pushes_key, vid, 1)
+            await pipe.execute()
+
+            logger.debug(f"Incremented push counts for {len(video_ids)} UGC videos")
+
+        except Exception as e:
+            # Non-critical - log and continue
+            # Push counts are used for prioritization, not correctness
+            logger.warning(f"Failed to increment UGC push counts: {e}")
+
+    # ------------------------------------------------------------------------
     # Videos To Show Operations (MAIN OPERATIONS - ASYNC VERSIONS)
     # ------------------------------------------------------------------------
 
@@ -936,7 +995,8 @@ class AsyncRedisLayer:
         to_show_key = self._key_videos_to_show(user_id, rec_type)
         watched_key = self._key_watched_short_lived(user_id)
         bloom_key = self._key_bloom_permanent(user_id)
-        max_to_check = min(count * 20, 10000)  # Buffer for watched/bloom filtering
+        # max_to_check = min(count * 20, 10000)  # Buffer for watched/bloom filtering
+        max_to_check = VIDEOS_TO_SHOW_CAPACITY
 
         videos = []
         total_removed = 0
@@ -1104,7 +1164,14 @@ class AsyncRedisLayer:
         else:
             logger.info(f"Successfully fetched {len(videos)} videos for {user_id}:{rec_type}")
 
-        return videos[:count]  # Trim to requested count
+        final_videos = videos[:count]  # Trim to requested count
+
+        # Increment push counts for UGC videos actually served
+        # This tracks ACTUAL impressions for priority-based discovery
+        if rec_type == "ugc" and final_videos:
+            await self._increment_ugc_push_counts(final_videos)
+
+        return final_videos
 
     async def add_videos_to_show(
         self,
@@ -1939,45 +2006,244 @@ class AsyncRedisLayer:
         self,
         user_id: str,
         target: int = 300,
-        batch_size: int = 100,
-        max_iterations: int = 5,
-        ttl: int = TTL_UGC_VIDEOS,
+        batch_size: int = 500,
+        max_iterations: int = 3,
+        ttl: int = TTL_UGC_USER_POOL,
     ) -> Dict[str, int]:
         """
-        Refill user's `videos_to_show:ugc` from global UGC pool.
-        CLUSTER-SAFE VERSION - delegates to helper that splits global reads from user writes.
+        Refill user's `videos_to_show:ugc` from global UGC DISCOVERY pool.
+        Uses PRIORITY-BASED sampling: newest videos AND least-pushed videos first.
+
+        This replaces the old ZRANDMEMBER approach that favored older videos.
+        The priority formula ensures fresh uploads get discovered:
+            priority = upload_timestamp - (push_count * PUSH_PENALTY_SECONDS)
 
         Algorithm:
-            1. Get global UGC pool key
-            2. Delegate to _refill_from_single_pool helper
+            1. Acquire lock for ugc refill
+            2. Ensure bloom filter exists
+            3. Sample candidates from discovery pool ZSET (by expiry, valid only)
+            4. Batch-fetch push counts and timestamps from HASH
+            5. Calculate priority for each video
+            6. Sort by priority descending, take top candidates
+            7. Filter via Lua (bloom + watched:short check)
+            8. Add to user pool with SHORT TTL (1 hour for freshness)
+            9. Release lock
+
+        Note: Push count increment happens at FETCH TIME (in fetch_videos),
+        not here. This ensures push_count reflects actual impressions.
 
         Args:
             user_id: User ID to refill UGC pool for
-            target: Target number of videos in pool (default: 100, smaller since UGC is 5% of feed)
-            batch_size: Batch size for sampling (default: 100)
-            max_iterations: Max refill iterations (default: 5)
-            ttl: TTL for videos (default: from config)
+            target: Target number of videos in pool (default: 300)
+            batch_size: Batch size for sampling (default: 500, larger to allow sorting)
+            max_iterations: Max refill iterations (default: 3)
+            ttl: TTL for videos in user pool (default: 1 hour for freshness)
 
         Returns:
             Dict with refill stats: added_total, iterations, filtered_watched,
             filtered_bloom, valid_after, sources_exhausted
         """
-        stats = await self._refill_from_single_pool(
-            user_id=user_id,
-            rec_type="ugc",
-            global_pool_key=self._key_global_ugc_zset(),
-            target=target,
-            batch_size=batch_size,
-            max_iterations=max_iterations,
-            ttl=ttl,
-        )
+        await self._acquire_lock(user_id, "ugc")
+        try:
+            await self.init_user_bloom_filter(user_id)
+            to_show_key = self._key_videos_to_show(user_id, "ugc")
+            watched_key = self._key_watched_short_lived(user_id)
+            bloom_key = self._key_bloom_permanent(user_id)
 
-        logger.info(
-            f"UGC refill for {user_id}: added={stats['added_total']}, "
-            f"filtered_watched={stats['filtered_watched']}, filtered_bloom={stats['filtered_bloom']}"
-        )
+            # UGC Discovery pool keys
+            pool_key = self._key_global_ugc_discovery_zset()
+            pushes_key = self._key_global_ugc_discovery_pushes()
+            timestamps_key = self._key_global_ugc_discovery_timestamps()
 
-        return stats
+            now = int(time.time())
+
+            # Step 1: Sample candidates from discovery pool (Python - cross-slot OK)
+            candidates = []
+            iterations_total = 0
+            sources_exhausted = True
+
+            for _ in range(max_iterations):
+                iterations_total += 1
+
+                # Sample from global pool - get more than needed to allow sorting
+                # Use ZRANGEBYSCORE to get valid (non-expired) entries
+                batch = await self.db.zrangebyscore(
+                    pool_key, now, '+inf', start=0, num=batch_size, withscores=True
+                )
+
+                # DEBUG: Log batch type and first few elements after zrangebyscore
+                logger.debug(
+                    f"[UGC refill] zrangebyscore batch: type={type(batch).__name__}, "
+                    f"len={len(batch) if batch else 0}, "
+                    f"first_3={batch[:3] if batch else []}, "
+                    f"first_elem_type={type(batch[0]).__name__ if batch else 'N/A'}"
+                )
+
+                if not batch:
+                    break  # Pool empty or all expired
+
+                # Extract video IDs from batch
+                # Note: zrangebyscore with withscores=True returns [(vid, score), ...]
+                # This is different from zrandmember which returns [vid, score, vid, score, ...]
+                batch_vids = []
+                for item in batch:
+                    if isinstance(item, tuple):
+                        vid = item[0]
+                    else:
+                        vid = item
+                    if isinstance(vid, bytes):
+                        vid = vid.decode('utf-8')
+                    batch_vids.append(vid)
+
+                # DEBUG: Log batch_vids type and sample after extraction
+                logger.debug(
+                    f"[UGC refill] batch_vids: type={type(batch_vids).__name__}, "
+                    f"len={len(batch_vids)}, "
+                    f"first_3={batch_vids[:3] if batch_vids else []}, "
+                    f"first_elem_type={type(batch_vids[0]).__name__ if batch_vids else 'N/A'}"
+                )
+
+                if not batch_vids:
+                    break
+
+                # Step 2: Batch-fetch push counts and timestamps
+                push_counts_raw = await self.client.hmget(pushes_key, *batch_vids)
+                timestamps_raw = await self.client.hmget(timestamps_key, *batch_vids)
+
+                # DEBUG: Log raw push counts and timestamps
+                logger.debug(
+                    f"[UGC refill] push_counts_raw: type={type(push_counts_raw).__name__}, "
+                    f"len={len(push_counts_raw) if push_counts_raw else 0}, "
+                    f"first_3={push_counts_raw[:3] if push_counts_raw else []}"
+                )
+                logger.debug(
+                    f"[UGC refill] timestamps_raw: type={type(timestamps_raw).__name__}, "
+                    f"len={len(timestamps_raw) if timestamps_raw else 0}, "
+                    f"first_3={timestamps_raw[:3] if timestamps_raw else []}"
+                )
+
+                # Step 3: Calculate priority for each video
+                # priority = upload_timestamp - (push_count * PUSH_PENALTY)
+                for i, vid in enumerate(batch_vids):
+                    # Parse push count (default 0 if missing)
+                    push_count = 0
+                    if push_counts_raw[i]:
+                        try:
+                            raw_val = push_counts_raw[i]
+                            if isinstance(raw_val, bytes):
+                                raw_val = raw_val.decode('utf-8')
+                            push_count = int(raw_val)
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Parse timestamp (skip if missing - data integrity issue)
+                    ts = 0
+                    if timestamps_raw[i]:
+                        try:
+                            raw_ts = timestamps_raw[i]
+                            if isinstance(raw_ts, bytes):
+                                raw_ts = raw_ts.decode('utf-8')
+                            ts = int(raw_ts)
+                        except (ValueError, TypeError):
+                            pass
+
+                    if ts == 0:
+                        # Skip videos with missing timestamp
+                        continue
+
+                    # Calculate priority: newer videos + less-pushed = higher priority
+                    priority = ts - (push_count * UGC_DISCOVERY_PUSH_PENALTY)
+                    candidates.append((vid, priority, push_count))
+
+                # Check if we have enough candidates (2x buffer for filtering)
+                if len(candidates) >= target * 2:
+                    sources_exhausted = False
+                    break
+
+            # Step 4: Sort by priority descending, take top candidates
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            top_candidates = [vid for vid, _, _ in candidates[:target * 2]]
+
+            # DEBUG: Log top_candidates before Lua script call
+            logger.debug(
+                f"[UGC refill] top_candidates: type={type(top_candidates).__name__}, "
+                f"len={len(top_candidates)}, "
+                f"first_5={top_candidates[:5] if top_candidates else []}, "
+                f"first_elem_type={type(top_candidates[0]).__name__ if top_candidates else 'N/A'}"
+            )
+            # DEBUG: Also check if any element is unexpectedly a tuple
+            if top_candidates:
+                for idx, vid in enumerate(top_candidates[:10]):
+                    if not isinstance(vid, (str, bytes, int, float)):
+                        logger.debug(
+                            f"[UGC refill] WARNING: top_candidates[{idx}] is unexpected type: "
+                            f"type={type(vid).__name__}, value={vid}"
+                        )
+
+            # Step 5: Filter and add using Lua script (user keys only - cluster-safe)
+            added_total = 0
+            filtered_watched = 0
+            filtered_bloom = 0
+
+            if top_candidates:
+                try:
+                    # DEBUG: Log full args before Lua call
+                    lua_args = [now, ttl, VIDEOS_TO_SHOW_CAPACITY] + top_candidates
+                    logger.debug(
+                        f"[UGC refill] Lua script args: "
+                        f"now={now}, ttl={ttl}, capacity={VIDEOS_TO_SHOW_CAPACITY}, "
+                        f"args_len={len(lua_args)}, "
+                        f"args_types={[type(a).__name__ for a in lua_args[:10]]}"
+                    )
+
+                    result = await self.scripts._execute_script(
+                        self.scripts.filter_and_add_videos,
+                        "filter_and_add_videos",
+                        keys=[to_show_key, watched_key, bloom_key],
+                        args=lua_args,
+                        semaphore=self.redis_semaphore,
+                    )
+
+                    added_total = result[0]
+                    filtered_watched = result[1]
+                    filtered_bloom = result[2]
+                except Exception as lua_err:
+                    logger.error(
+                        f"[UGC refill] Lua script failed for user {user_id}: {lua_err}\n"
+                        f"Traceback:\n{traceback.format_exc()}"
+                    )
+                    raise
+
+            # Get final valid count
+            valid_after = await self.count_valid_videos_to_show(user_id, "ugc")
+
+            stats = {
+                "added_total": added_total,
+                "iterations": iterations_total,
+                "filtered_watched": filtered_watched,
+                "filtered_bloom": filtered_bloom,
+                "valid_after": valid_after,
+                "sources_exhausted": sources_exhausted,
+                "candidates_sampled": len(candidates),
+            }
+
+            logger.info(
+                f"UGC Discovery refill for {user_id}: added={added_total}, "
+                f"filtered_w={filtered_watched}, filtered_b={filtered_bloom}, "
+                f"candidates={len(candidates)}, valid_after={valid_after}"
+            )
+
+            return stats
+
+        except Exception as e:
+            logger.error(
+                f"[UGC refill] Exception in refill_ugc for user {user_id}: {e}\n"
+                f"Traceback:\n{traceback.format_exc()}"
+            )
+            raise
+
+        finally:
+            await self._release_lock(user_id, "ugc")
 
     async def _background_refill(self, user_id: str, rec_type: str):
         """
