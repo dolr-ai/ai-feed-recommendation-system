@@ -33,3 +33,4 @@ dotenv
 
 # Error tracking and performance monitoring
 sentry-sdk[fastapi]
+pyinstrument
