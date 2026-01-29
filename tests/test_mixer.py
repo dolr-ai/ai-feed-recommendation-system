@@ -212,13 +212,20 @@ class TestUGCInterspersing:
         user_id = "test_ugc_001"
 
         try:
-            # Seed global UGC pool
+            # Seed UGC discovery pool (refill_ugc reads from discovery pool)
             import time
             ugc_videos = generate_video_ids("vid_ugc", 50)
-            expiry = float(int(time.time()) + 86400)
+            now = int(time.time())
+            expiry = float(now + 86400)
             mapping = {vid: expiry for vid in ugc_videos}
-            redis_client.delete("{GLOBAL}:pool:ugc")
-            redis_client.zadd("{GLOBAL}:pool:ugc", mapping)
+            redis_client.delete("{GLOBAL}:pool:ugc_discovery")
+            redis_client.delete("{GLOBAL}:ugc_discovery:pushes")
+            redis_client.delete("{GLOBAL}:ugc_discovery:timestamps")
+            redis_client.zadd("{GLOBAL}:pool:ugc_discovery", mapping)
+            # Set timestamps and push counts for priority calculation
+            for vid in ugc_videos:
+                redis_client.hset("{GLOBAL}:ugc_discovery:timestamps", vid, now)
+                redis_client.hset("{GLOBAL}:ugc_discovery:pushes", vid, 0)
 
             result = await mixer.get_mixed_recommendations(user_id, count=100)
 
@@ -228,7 +235,9 @@ class TestUGCInterspersing:
 
         finally:
             clear_user_keys(redis_client, user_id)
-            redis_client.delete("{GLOBAL}:pool:ugc")
+            redis_client.delete("{GLOBAL}:pool:ugc_discovery")
+            redis_client.delete("{GLOBAL}:ugc_discovery:pushes")
+            redis_client.delete("{GLOBAL}:ugc_discovery:timestamps")
             await service.close()
 
 

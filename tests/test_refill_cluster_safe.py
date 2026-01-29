@@ -410,10 +410,10 @@ class TestRefillUGCClusterSafe:
     @pytest.mark.asyncio
     async def test_refill_from_ugc_pool(self, redis_client, redis_config):
         """
-        UGC refill should sample from global UGC pool.
+        UGC refill should sample from global UGC discovery pool.
 
         Algorithm:
-            1. Seed UGC pool with NEW key pattern ({GLOBAL}:pool:ugc)
+            1. Seed UGC discovery pool ({GLOBAL}:pool:ugc_discovery) with timestamps and push counts
             2. Call refill_ugc
             3. Verify user pool has videos
         """
@@ -431,11 +431,19 @@ class TestRefillUGCClusterSafe:
             now = int(time.time())
             expiry = float(now + 86400)
 
-            # Seed UGC pool
+            # Seed UGC discovery pool (refill_ugc reads from discovery pool)
             videos = [f"vid_ugc_{i:06d}" for i in range(100)]
-            pool_key = "{GLOBAL}:pool:ugc"
+            pool_key = "{GLOBAL}:pool:ugc_discovery"
+            pushes_key = "{GLOBAL}:ugc_discovery:pushes"
+            timestamps_key = "{GLOBAL}:ugc_discovery:timestamps"
             redis_client.delete(pool_key)
+            redis_client.delete(pushes_key)
+            redis_client.delete(timestamps_key)
             redis_client.zadd(pool_key, {v: expiry for v in videos})
+            # Set timestamps and push counts for priority calculation
+            for v in videos:
+                redis_client.hset(timestamps_key, v, now)
+                redis_client.hset(pushes_key, v, 0)
 
             # Call refill
             result = await redis_layer.refill_ugc(user_id, target=50)
@@ -455,7 +463,9 @@ class TestRefillUGCClusterSafe:
                 f"{{user:{user_id}}}:bloom:permanent",
                 f"{{user:{user_id}}}:refill:lock:ugc",
                 f"{{user:{user_id}}}:refill:last:ugc",
-                "{GLOBAL}:pool:ugc",
+                "{GLOBAL}:pool:ugc_discovery",
+                "{GLOBAL}:ugc_discovery:pushes",
+                "{GLOBAL}:ugc_discovery:timestamps",
             ]
             for key in cleanup_keys:
                 redis_client.delete(key)
