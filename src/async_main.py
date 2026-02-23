@@ -1094,6 +1094,12 @@ class AsyncRedisLayer:
                     else:
                         logger.warning(f"Unknown rec_type '{rec_type}', skipping refill")
                         break
+                except RuntimeError as e:
+                    if "lock already held" in str(e):
+                        logger.debug(f"Refill skipped for {user_id}:{rec_type} (lock held by concurrent request)")
+                    else:
+                        logger.error(f"Refill failed for {user_id}:{rec_type}: {e}")
+                    break
                 except Exception as e:
                     logger.error(f"Refill failed for {user_id}:{rec_type}: {e}")
                     break
@@ -1152,6 +1158,11 @@ class AsyncRedisLayer:
 
                     logger.info(f"Fetched {len(fallback_videos)} from fallback (filtered_ex={fallback_filtered_exclude})")
                     videos.extend(fallback_videos)
+                except RuntimeError as e:
+                    if "lock already held" in str(e):
+                        logger.debug(f"Fallback fetch skipped (lock held by concurrent request)")
+                    else:
+                        logger.error(f"Fallback fetch failed: {e}")
                 except Exception as e:
                     logger.error(f"Fallback fetch failed: {e}")
 

@@ -66,12 +66,15 @@ def filter_transient_errors(event, hint):
     Sentry before_send hook to filter out known transient errors.
 
     Algorithm:
-        1. Check if the hint contains exception info
-        2. If so, extract the exception type and message
-        3. Filter out known transient errors:
+        1. Check if the hint contains exception info (raised exceptions)
+        2. If so, filter known transient exception types and messages:
            - TimeoutError: Redis connection timeouts during high load
+           - ConnectionResetError: Transient network resets
            - Refill lock conflicts: Concurrent request race condition
            - Bloom filter race: Key already exists during initialization
+        3. Also check event message/logentry for logger-captured events
+           (Sentry logging integration captures logger.error() calls without
+           exc_info, so they bypass the exception check above)
         4. Return None to drop the event, or the event to send it
 
     Args:
@@ -81,20 +84,32 @@ def filter_transient_errors(event, hint):
     Returns:
         event dict if error should be sent to Sentry, None to drop it
     """
+    TRANSIENT_PATTERNS = [
+        "refill lock already held",
+        "key already exists",
+    ]
+
     if "exc_info" in hint:
         exc_type, exc_value, _ = hint["exc_info"]
         error_message = str(exc_value).lower()
 
         # Filter timeout errors (Redis connection timeouts)
-        if exc_type.__name__ == "TimeoutError":
+        if exc_type.__name__ in ("TimeoutError", "ConnectionResetError"):
             return None
 
-        # Filter refill lock conflicts (concurrent request race condition)
-        if "refill lock already held" in error_message:
+        # Filter known transient error messages
+        if any(pattern in error_message for pattern in TRANSIENT_PATTERNS):
             return None
 
-        # Filter bloom filter race condition (key already exists)
-        if "key already exists" in error_message:
-            return None
+    # Safety net: also check event message for logger-captured events
+    # (logger.error calls are captured by Sentry logging integration
+    # without exc_info, so the check above misses them)
+    message = (
+        event.get("logentry", {}).get("message", "")
+        or event.get("message", "")
+        or ""
+    ).lower()
+    if any(pattern in message for pattern in TRANSIENT_PATTERNS):
+        return None
 
     return event
