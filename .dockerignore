@@ -34,14 +34,16 @@ build/
 docs/
 
 # Testing
+tests/
 stress_testing_recommendation/
 stress_probe.py
-src/tests/
-src/redis_testing.py
+legacy_recommendation_system/tests/
+legacy_recommendation_system/redis_testing.py
 
 # Local development
 redis-local-setup/
 entrypoint_local.sh
+entrypoint_production.sh
 
 # Temporary files
 *.log
@@ -57,6 +59,18 @@ temp/
 results_*/
 data/
 *.csv
+influencers_all.json
+influencers_enriched.json
+
+# Legacy and old deploy path
+legacy_recommendation_system/
+fly_prod.toml
+fly_stage.toml
+Dockerfile
+setup.py
+check_bq_ch_sync.py
+migrate_bq_to_clickhouse.py
+package-lock.json
 
 # WARP specific
 WARP.md

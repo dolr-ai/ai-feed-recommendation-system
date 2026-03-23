@@ -8,7 +8,7 @@ Uses real Redis with seeded test data.
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "legacy_recommendation_system"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 import pytest

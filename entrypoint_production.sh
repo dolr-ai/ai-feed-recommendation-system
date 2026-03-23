@@ -27,7 +27,7 @@ export PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
 rm -rf $PROMETHEUS_MULTIPROC_DIR
 mkdir -p $PROMETHEUS_MULTIPROC_DIR
 
-cd src
+cd legacy_recommendation_system
 
 uvicorn async_api_server:app \
     --host 0.0.0.0 \
