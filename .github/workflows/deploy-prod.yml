@@ -1,8 +1,6 @@
-name: Deploy to Production
+name: Archived Fly Production Deploy (Unused)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 env:
@@ -10,6 +8,7 @@ env:
 
 jobs:
   test:
+    if: false
     name: Run Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -42,6 +41,7 @@ jobs:
           pytest tests/ -v --tb=short
 
   deploy:
+    if: false
     name: Deploy to Fly.io (Production)
     runs-on: ubuntu-latest
     timeout-minutes: 15

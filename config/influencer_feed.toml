@@ -1,0 +1,75 @@
+# External configuration for the influencer feed service.
+# Change values here or via environment variables; no code changes are needed.
+
+storage_namespace = "prod"
+
+kvrocks_host = "127.0.0.1"
+kvrocks_port = 6666
+kvrocks_password = ""
+kvrocks_tls_enabled = false
+kvrocks_cluster_enabled = false
+
+chat_api_base_url = "https://chat.yral.com"
+chat_api_timeout = 30
+
+ic_gateway_base_url = "https://ic0.app"
+profile_canister_id = "ivkka-7qaaa-aaaas-qbg3q-cai"
+posts_canister_id = "gxhc3-pqaaa-aaaas-qbh3q-cai"
+canister_rps = 25.0
+canister_concurrency = 10
+canister_http_timeout_sec = 15.0
+canister_query_retries = 2
+canister_retry_backoff_sec = 0.5
+
+engagement_w_conversation = 0.45
+engagement_w_messages = 0.30
+engagement_w_followers = 0.15
+engagement_w_depth_quality = 0.10
+
+discovery_w_newness = 0.35
+discovery_w_momentum = 0.30
+discovery_w_underexposure = 0.20
+discovery_w_content_activity = 0.10
+discovery_w_depth_quality = 0.05
+
+content_w_post_recency = 0.40
+content_w_posting_density = 0.30
+content_w_views_per_post = 0.20
+content_w_share_rate = 0.10
+
+new_bot_age_threshold_days = 7
+content_post_recency_halflife_days = 7
+discovery_max_conversations = 200
+discovery_min_conversations = 3
+discovery_min_messages = 20
+discovery_min_followers = 2
+depth_confidence_full_at_conversations = 20
+
+mom_w_conv = 0.35
+mom_w_messages = 0.25
+mom_w_shares = 0.20
+mom_w_views = 0.10
+mom_w_followers = 0.10
+
+serve_penalty_per_count = 0.0015
+mixer_pattern = "E,E,D,E,D,E,E,D,E,D"
+
+norm_lower_percentile = 5.0
+norm_upper_percentile = 95.0
+
+feed_sync_interval_sec = 21600
+discovery_refresh_interval_sec = 1800
+scheduler_enabled = true
+feed_sync_run_on_startup = true
+discovery_refresh_run_on_startup = true
+scheduler_misfire_grace_time_sec = 300
+
+feed_ttl_sec = 90000
+snapshot_ttl_sec = 90000
+checkpoint_ttl_sec = 86400
+serve_count_ttl_sec = 2592000
+
+feed_default_limit = 50
+feed_max_limit = 100
+
+log_level = "INFO"

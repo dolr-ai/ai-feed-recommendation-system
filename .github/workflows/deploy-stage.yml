@@ -1,8 +1,6 @@
-name: Deploy to Stage
+name: Archived Fly Stage Deploy (Unused)
 
 on:
-  push:
-    branches: [stage]
   workflow_dispatch:
 
 env:
@@ -42,6 +40,7 @@ jobs:
   #         pytest tests/ -v --tb=short
 
   deploy:
+    if: false
     name: Deploy to Fly.io (Stage)
     runs-on: ubuntu-latest
     timeout-minutes: 15
