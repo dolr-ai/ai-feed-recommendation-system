@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
-COPY src/ ./src/
+COPY legacy_recommendation_system/ ./legacy_recommendation_system/
 
 # Copy production entrypoint script
 COPY entrypoint_production.sh .
