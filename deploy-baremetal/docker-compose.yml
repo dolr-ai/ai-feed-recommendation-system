@@ -1,0 +1,61 @@
+services:
+  app:
+    image: ${APP_IMAGE:-ghcr.io/dolr-ai/ai-feed-recommendation-system}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      INFLUENCER_FEED_CONFIG_FILE: /app/config/influencer_feed.toml
+      STORAGE_NAMESPACE: ${STORAGE_NAMESPACE:-prod}
+      KVROCKS_HOST: ${KVROCKS_HOST}
+      KVROCKS_PORT: ${KVROCKS_PORT}
+      KVROCKS_PASSWORD: ${KVROCKS_PASSWORD}
+      KVROCKS_TLS_ENABLED: ${KVROCKS_TLS_ENABLED:-false}
+      KVROCKS_CLUSTER_ENABLED: ${KVROCKS_CLUSTER_ENABLED:-false}
+      KVROCKS_SSL_CA_CERT: ${KVROCKS_SSL_CA_CERT:-}
+      KVROCKS_SSL_CLIENT_CERT: ${KVROCKS_SSL_CLIENT_CERT:-}
+      KVROCKS_SSL_CLIENT_KEY: ${KVROCKS_SSL_CLIENT_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      FEED_SYNC_RUN_ON_STARTUP: ${FEED_SYNC_RUN_ON_STARTUP:-true}
+      DISCOVERY_REFRESH_RUN_ON_STARTUP: ${DISCOVERY_REFRESH_RUN_ON_STARTUP:-false}
+    ports:
+      - "127.0.0.1:${HOST_APP_PORT:-8000}:8000"
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - recsys-net
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["edge"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - recsys-net
+
+networks:
+  recsys-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

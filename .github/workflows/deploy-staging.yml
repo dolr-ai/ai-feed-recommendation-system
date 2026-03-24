@@ -1,0 +1,177 @@
+name: Deploy Coolify Staging
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-coolify-staging-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  COOLIFY_BASE_URL: ${{ vars.COOLIFY_BASE_URL || 'https://coolify.yral.com' }}
+
+jobs:
+  build_check:
+    uses: ./.github/workflows/build-check.yml
+    with:
+      python-version: "3.11"
+    secrets: inherit
+
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build_check]
+    outputs:
+      image_tag: ${{ github.sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=staging-latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deploy-baremetal/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Coolify staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build-and-push]
+    environment:
+      name: stage
+      url: ${{ vars.STAGING_APP_URL }}
+
+    steps:
+      - name: Validate Coolify configuration
+        run: |
+          test -n "${{ secrets.COOLIFY_TOKEN }}" || { echo "Missing secret: COOLIFY_TOKEN"; exit 1; }
+          test -n "${{ vars.COOLIFY_STAGING_APP_UUID }}" || { echo "Missing variable: COOLIFY_STAGING_APP_UUID"; exit 1; }
+
+      - name: Update staging application image
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          APP_UUID: ${{ vars.COOLIFY_STAGING_APP_UUID }}
+        run: |
+          RESPONSE_CODE=$(curl -sS -o /tmp/coolify_app_update.json -w "%{http_code}" \
+            -X PATCH \
+            "${{ env.COOLIFY_BASE_URL }}/api/v1/applications/${APP_UUID}" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"docker_registry_image_name\": \"${{ env.IMAGE_NAME }}\",
+              \"docker_registry_image_tag\": \"${IMAGE_TAG}\"
+            }")
+
+          if [ "${RESPONSE_CODE}" -lt 200 ] || [ "${RESPONSE_CODE}" -ge 300 ]; then
+            echo "Failed to update Coolify application (HTTP ${RESPONSE_CODE})"
+            cat /tmp/coolify_app_update.json
+            exit 1
+          fi
+
+      - name: Trigger deployment
+        id: deploy
+        env:
+          APP_UUID: ${{ vars.COOLIFY_STAGING_APP_UUID }}
+        run: |
+          RESPONSE=$(curl -sS -X POST \
+            "${{ env.COOLIFY_BASE_URL }}/api/v1/applications/${APP_UUID}/start" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"uuid\": \"${APP_UUID}\",
+              \"force\": true
+            }")
+
+          echo "Deploy response: ${RESPONSE}"
+
+          DEPLOY_UUID=$(echo "${RESPONSE}" | jq -r '.deployment_uuid // empty')
+          if [ -z "${DEPLOY_UUID}" ]; then
+            echo "Failed to trigger Coolify deployment"
+            exit 1
+          fi
+
+          echo "deploy_uuid=${DEPLOY_UUID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployment
+        env:
+          DEPLOY_UUID: ${{ steps.deploy.outputs.deploy_uuid }}
+        run: |
+          MAX_WAIT=300
+          WAITED=0
+
+          while [ "${WAITED}" -lt "${MAX_WAIT}" ]; do
+            STATUS=$(curl -sS \
+              "${{ env.COOLIFY_BASE_URL }}/api/v1/deployments/${DEPLOY_UUID}" \
+              -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+              | jq -r '.status // empty')
+
+            echo "Status: ${STATUS:-unknown} (${WAITED}s elapsed)"
+
+            if [ "${STATUS}" = "finished" ]; then
+              exit 0
+            fi
+
+            if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "error" ]; then
+              exit 1
+            fi
+
+            sleep 10
+            WAITED=$((WAITED + 10))
+          done
+
+          echo "Timed out waiting for Coolify deployment"
+          exit 1
+
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [build-and-push, deploy]
+
+    steps:
+      - name: Write summary
+        run: |
+          {
+            echo "## Coolify Staging Deployment Summary"
+            echo ""
+            echo "- Image: \`${{ env.IMAGE_NAME }}\`"
+            echo "- Image tag: \`${{ needs.build-and-push.outputs.image_tag }}\`"
+            echo "- Coolify app UUID: \`${{ vars.COOLIFY_STAGING_APP_UUID || 'unset' }}\`"
+            echo "- Deployment URL: \`${{ vars.STAGING_APP_URL || 'unset' }}\`"
+            echo "- Deploy status: \`${{ needs.deploy.result }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

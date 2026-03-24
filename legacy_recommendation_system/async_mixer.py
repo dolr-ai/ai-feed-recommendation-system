@@ -71,7 +71,8 @@ class AsyncVideoMixer:
         """
         Initialize the async video mixer.
 
-        Args:
+        Args:"This module provides stubbed vector search functionality"
+
             redis_layer: Async Redis layer for fetching videos from feeds
             kvrocks_service: Optional AsyncKVRocksService for background jobs
         """
