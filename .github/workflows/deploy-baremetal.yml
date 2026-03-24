@@ -80,6 +80,7 @@ jobs:
         id: servers
         run: |
           IPS="${{ vars.BAREMETAL_SERVER_IPS }}"
+          # Order is preserved, so the first IP in BAREMETAL_SERVER_IPS deploys first.
           JSON=$(echo "$IPS" | tr ',' '\n' | sed '/^\s*$/d' | jq -R . | jq -s -c .)
           echo "servers=$JSON" >> "$GITHUB_OUTPUT"
 
@@ -89,7 +90,8 @@ jobs:
     timeout-minutes: 30
     needs: [build-and-push, prepare-servers]
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 1
       matrix:
         server: ${{ fromJson(needs.prepare-servers.outputs.servers) }}
 
@@ -99,11 +101,9 @@ jobs:
 
       - name: Write SSH key
         run: |
-          mkdir -p ~/.ssh
-          cat > ~/.ssh/hetzner_baremetal_key <<'EOF'
-          ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          EOF
-          chmod 600 ~/.ssh/hetzner_baremetal_key
+          install -m 700 -d ~/.ssh
+          install -m 600 /dev/null ~/.ssh/hetzner_baremetal_key
+          printf '%s\n' '${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}' > ~/.ssh/hetzner_baremetal_key
 
       - name: Add server to known_hosts
         run: |

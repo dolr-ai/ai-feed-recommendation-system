@@ -1,4 +1,4 @@
-name: Deploy Bare Metal Staging
+name: Deploy Coolify Staging
 
 on:
   push:
@@ -6,19 +6,17 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
   packages: write
 
 concurrency:
-  group: deploy-baremetal-staging-${{ github.ref }}
-  cancel-in-progress: false
+  group: deploy-coolify-staging-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHON_VERSION: "3.11"
-  APP_NAME: ai-feed-recommendation-system-staging
-  DEPLOY_DIR: /home/ai-feed-recommendation-system-staging
-  HOST_APP_PORT: "18000"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  COOLIFY_BASE_URL: ${{ vars.COOLIFY_BASE_URL || 'https://coolify.yral.com' }}
 
 jobs:
   build_check:
@@ -53,7 +51,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=sha,format=long,prefix=
             type=raw,value=staging-latest
@@ -69,109 +67,95 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  prepare-servers:
-    name: Prepare server matrix
-    runs-on: ubuntu-latest
-    outputs:
-      servers: ${{ steps.servers.outputs.servers }}
-
-    steps:
-      - name: Parse server list
-        id: servers
-        run: |
-          IPS="${{ vars.BAREMETAL_SERVER_IPS }}"
-          JSON=$(echo "$IPS" | tr ',' '\n' | sed '/^\s*$/d' | jq -R . | jq -s -c .)
-          echo "servers=$JSON" >> "$GITHUB_OUTPUT"
-
   deploy:
-    name: Deploy to staging bare metal
+    name: Deploy to Coolify staging
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [build-and-push, prepare-servers]
-    strategy:
-      fail-fast: false
-      matrix:
-        server: ${{ fromJson(needs.prepare-servers.outputs.servers) }}
+    timeout-minutes: 20
+    needs: [build-and-push]
+    environment:
+      name: stage
+      url: ${{ vars.STAGING_APP_URL }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Write SSH key
+      - name: Validate Coolify configuration
         run: |
-          mkdir -p ~/.ssh
-          cat > ~/.ssh/hetzner_baremetal_key <<'EOF'
-          ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          EOF
-          chmod 600 ~/.ssh/hetzner_baremetal_key
+          test -n "${{ secrets.COOLIFY_TOKEN }}" || { echo "Missing secret: COOLIFY_TOKEN"; exit 1; }
+          test -n "${{ vars.COOLIFY_STAGING_APP_UUID }}" || { echo "Missing variable: COOLIFY_STAGING_APP_UUID"; exit 1; }
 
-      - name: Add server to known_hosts
-        run: |
-          ssh-keyscan -H ${{ matrix.server }} >> ~/.ssh/known_hosts
-
-      - name: Check connectivity
-        run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key -o ConnectTimeout=10 root@${{ matrix.server }} "echo 'Server connection successful'"
-
-      - name: Sync deployment files
-        run: |
-          rsync -avz --delete -e "ssh -i ~/.ssh/hetzner_baremetal_key" ./deploy-baremetal/ root@${{ matrix.server }}:${{ env.DEPLOY_DIR }}/
-
-      - name: Log in to GHCR on server
-        run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
-            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          "
-
-      - name: Deploy stack
+      - name: Update staging application image
         env:
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          APP_UUID: ${{ vars.COOLIFY_STAGING_APP_UUID }}
         run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
-            mkdir -p ${{ env.DEPLOY_DIR }} &&
-            cd ${{ env.DEPLOY_DIR }} &&
-            APP_IMAGE=ghcr.io/${{ github.repository }} \
-            IMAGE_TAG=${IMAGE_TAG} \
-            HOST_APP_PORT=${{ env.HOST_APP_PORT }} \
-            docker compose pull app &&
-            HOST_APP_PORT=${{ env.HOST_APP_PORT }} \
-            docker compose down --remove-orphans || true &&
-            APP_IMAGE=ghcr.io/${{ github.repository }} \
-            IMAGE_TAG=${IMAGE_TAG} \
-            HOST_APP_PORT=${{ env.HOST_APP_PORT }} \
-            STORAGE_NAMESPACE='staging' \
-            KVROCKS_HOST='${{ secrets.PROD_KVROCKS_HOST }}' \
-            KVROCKS_PORT='${{ secrets.PROD_KVROCKS_PORT }}' \
-            KVROCKS_PASSWORD='${{ secrets.PROD_KVROCKS_PASSWORD }}' \
-            KVROCKS_TLS_ENABLED='${{ secrets.KVROCKS_TLS_ENABLED }}' \
-            KVROCKS_CLUSTER_ENABLED='${{ secrets.KVROCKS_CLUSTER_ENABLED }}' \
-            KVROCKS_SSL_CA_CERT='${{ secrets.KVROCKS_SSL_CA_CERT }}' \
-            KVROCKS_SSL_CLIENT_CERT='${{ secrets.KVROCKS_SSL_CLIENT_CERT }}' \
-            KVROCKS_SSL_CLIENT_KEY='${{ secrets.KVROCKS_SSL_CLIENT_KEY }}' \
-            LOG_LEVEL='${{ vars.STAGING_LOG_LEVEL || 'INFO' }}' \
-            SCHEDULER_ENABLED='${{ vars.STAGING_SCHEDULER_ENABLED || 'false' }}' \
-            FEED_SYNC_RUN_ON_STARTUP='${{ vars.STAGING_FEED_SYNC_RUN_ON_STARTUP || 'false' }}' \
-            DISCOVERY_REFRESH_RUN_ON_STARTUP='${{ vars.STAGING_DISCOVERY_REFRESH_RUN_ON_STARTUP || 'false' }}' \
-            docker compose up -d app &&
-            sleep 30 &&
-            docker compose ps
-          "
+          RESPONSE_CODE=$(curl -sS -o /tmp/coolify_app_update.json -w "%{http_code}" \
+            -X PATCH \
+            "${{ env.COOLIFY_BASE_URL }}/api/v1/applications/${APP_UUID}" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"docker_registry_image_name\": \"${{ env.IMAGE_NAME }}\",
+              \"docker_registry_image_tag\": \"${IMAGE_TAG}\"
+            }")
 
-      - name: Verify deployment
-        run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
-            cd ${{ env.DEPLOY_DIR }} &&
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              if curl -sf http://127.0.0.1:${{ env.HOST_APP_PORT }}/health > /dev/null 2>&1; then
-                echo 'Health check passed!'
-                exit 0
-              fi
-              echo 'Attempt failed, retrying in 3s...'
-              sleep 3
-            done
-            docker compose logs --tail=30 app
+          if [ "${RESPONSE_CODE}" -lt 200 ] || [ "${RESPONSE_CODE}" -ge 300 ]; then
+            echo "Failed to update Coolify application (HTTP ${RESPONSE_CODE})"
+            cat /tmp/coolify_app_update.json
             exit 1
-          "
+          fi
+
+      - name: Trigger deployment
+        id: deploy
+        env:
+          APP_UUID: ${{ vars.COOLIFY_STAGING_APP_UUID }}
+        run: |
+          RESPONSE=$(curl -sS -X POST \
+            "${{ env.COOLIFY_BASE_URL }}/api/v1/applications/${APP_UUID}/start" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"uuid\": \"${APP_UUID}\",
+              \"force\": true
+            }")
+
+          echo "Deploy response: ${RESPONSE}"
+
+          DEPLOY_UUID=$(echo "${RESPONSE}" | jq -r '.deployment_uuid // empty')
+          if [ -z "${DEPLOY_UUID}" ]; then
+            echo "Failed to trigger Coolify deployment"
+            exit 1
+          fi
+
+          echo "deploy_uuid=${DEPLOY_UUID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployment
+        env:
+          DEPLOY_UUID: ${{ steps.deploy.outputs.deploy_uuid }}
+        run: |
+          MAX_WAIT=300
+          WAITED=0
+
+          while [ "${WAITED}" -lt "${MAX_WAIT}" ]; do
+            STATUS=$(curl -sS \
+              "${{ env.COOLIFY_BASE_URL }}/api/v1/deployments/${DEPLOY_UUID}" \
+              -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+              | jq -r '.status // empty')
+
+            echo "Status: ${STATUS:-unknown} (${WAITED}s elapsed)"
+
+            if [ "${STATUS}" = "finished" ]; then
+              exit 0
+            fi
+
+            if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "error" ]; then
+              exit 1
+            fi
+
+            sleep 10
+            WAITED=$((WAITED + 10))
+          done
+
+          echo "Timed out waiting for Coolify deployment"
+          exit 1
 
   deployment-summary:
     name: Deployment Summary
@@ -183,9 +167,11 @@ jobs:
       - name: Write summary
         run: |
           {
-            echo "## Bare Metal Staging Deployment Summary"
+            echo "## Coolify Staging Deployment Summary"
             echo ""
+            echo "- Image: \`${{ env.IMAGE_NAME }}\`"
             echo "- Image tag: \`${{ needs.build-and-push.outputs.image_tag }}\`"
-            echo "- App name: \`${{ env.APP_NAME }}\`"
+            echo "- Coolify app UUID: \`${{ vars.COOLIFY_STAGING_APP_UUID || 'unset' }}\`"
+            echo "- Deployment URL: \`${{ vars.STAGING_APP_URL || 'unset' }}\`"
             echo "- Deploy status: \`${{ needs.deploy.result }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
