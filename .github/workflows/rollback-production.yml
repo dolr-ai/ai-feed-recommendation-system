@@ -1,74 +1,27 @@
-name: Deploy Bare Metal Production
+name: Rollback Production
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag to redeploy, for example a full commit SHA"
+        required: true
+        type: string
 
 permissions:
-  id-token: write
   contents: read
-  packages: write
+  packages: read
 
 concurrency:
   group: deploy-baremetal-prod
   cancel-in-progress: false
 
 env:
-  PYTHON_VERSION: "3.11"
   APP_NAME: ai-feed-recommendation-system
   DEPLOY_DIR: /home/ai-feed-recommendation-system
   HOST_APP_PORT: "8000"
 
 jobs:
-  build_check:
-    uses: ./.github/workflows/build-check.yml
-    with:
-      python-version: "3.11"
-    secrets: inherit
-
-  build-and-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [build_check]
-    outputs:
-      image_tag: ${{ github.sha }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=long,prefix=
-            type=raw,value=latest
-
-      - name: Build and push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./deploy-baremetal/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   prepare-servers:
     name: Prepare server matrix
     runs-on: ubuntu-latest
@@ -80,15 +33,15 @@ jobs:
         id: servers
         run: |
           IPS="${{ vars.BAREMETAL_SERVER_IPS }}"
-          # Order is preserved, so the first IP in BAREMETAL_SERVER_IPS deploys first.
+          # Order is preserved, so the first IP in BAREMETAL_SERVER_IPS rolls back first.
           JSON=$(echo "$IPS" | tr ',' '\n' | sed '/^\s*$/d' | jq -R . | jq -s -c .)
           echo "servers=$JSON" >> "$GITHUB_OUTPUT"
 
   deploy:
-    name: Deploy to bare metal
+    name: Roll back production
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [build-and-push, prepare-servers]
+    needs: [prepare-servers]
     strategy:
       fail-fast: true
       max-parallel: 1
@@ -123,9 +76,9 @@ jobs:
             echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           "
 
-      - name: Deploy stack
+      - name: Deploy rollback image
         env:
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
             mkdir -p ${{ env.DEPLOY_DIR }} &&
@@ -174,18 +127,18 @@ jobs:
           "
 
   deployment-summary:
-    name: Deployment Summary
+    name: Rollback Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-and-push, deploy]
+    needs: [deploy]
 
     steps:
       - name: Write summary
         run: |
           {
-            echo "## Bare Metal Deployment Summary"
+            echo "## Production Rollback Summary"
             echo ""
-            echo "- Image tag: \`${{ needs.build-and-push.outputs.image_tag }}\`"
+            echo "- Image tag: \`${{ inputs.image_tag }}\`"
             echo "- App name: \`${{ env.APP_NAME }}\`"
             echo "- Deploy status: \`${{ needs.deploy.result }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
