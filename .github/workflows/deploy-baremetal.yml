@@ -105,6 +105,10 @@ jobs:
           install -m 600 /dev/null ~/.ssh/hetzner_baremetal_key
           printf '%s\n' '${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}' > ~/.ssh/hetzner_baremetal_key
 
+      - name: Debug SSH public key
+        run: |
+          ssh-keygen -y -f ~/.ssh/hetzner_baremetal_key
+
       - name: Add server to known_hosts
         run: |
           ssh-keyscan -H ${{ matrix.server }} >> ~/.ssh/known_hosts
