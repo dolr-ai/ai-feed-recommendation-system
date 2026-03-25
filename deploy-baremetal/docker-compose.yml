@@ -2,6 +2,10 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/dolr-ai/ai-feed-recommendation-system}:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    logging:
+      driver: journald
+      options:
+        tag: recsys-app
     environment:
       PYTHONUNBUFFERED: "1"
       INFLUENCER_FEED_CONFIG_FILE: /app/config/influencer_feed.toml
@@ -35,6 +39,10 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     profiles: ["edge"]
+    logging:
+      driver: journald
+      options:
+        tag: recsys-caddy
     ports:
       - "80:80"
       - "443:443"
