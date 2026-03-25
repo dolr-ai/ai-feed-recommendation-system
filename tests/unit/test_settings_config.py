@@ -44,3 +44,15 @@ def test_env_overrides_beat_file_values(monkeypatch):
 def test_required_endpoint_and_canister_values_must_come_from_config_or_env():
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_curated_top_influencer_ids_accepts_csv_values():
+    settings = Settings(
+        chat_api_base_url="https://example.com",
+        ic_gateway_base_url="https://ic0.app",
+        profile_canister_id="profile-id",
+        posts_canister_id="posts-id",
+        curated_top_influencer_ids="id-1, id-2 ,, id-3",
+    )
+
+    assert settings.curated_top_influencer_ids == ["id-1", "id-2", "id-3"]

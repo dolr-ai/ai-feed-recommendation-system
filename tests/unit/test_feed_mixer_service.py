@@ -63,3 +63,54 @@ def test_feed_mixer_applies_expected_60_40_pattern(settings):
         "d4",
     ]
     assert [score.final_rank for score in ranked] == list(range(1, 11))
+
+
+def test_feed_mixer_moves_curated_ids_to_the_persisted_prefix(settings):
+    settings.curated_top_influencer_ids = ["d2", "e4"]
+    service = FeedMixerService(settings)
+    scores = [
+        _score("e1", 0.99, 0.0, False),
+        _score("e2", 0.98, 0.0, False),
+        _score("e3", 0.97, 0.0, False),
+        _score("e4", 0.96, 0.0, False),
+        _score("e5", 0.95, 0.0, False),
+        _score("e6", 0.94, 0.0, False),
+        _score("d1", 0.50, 0.99, True),
+        _score("d2", 0.49, 0.98, True),
+        _score("d3", 0.48, 0.97, True),
+        _score("d4", 0.47, 0.96, True),
+    ]
+
+    ranked = service.rank_scores(scores)
+
+    assert [score.influencer_id for score in ranked] == [
+        "d2",
+        "e4",
+        "e1",
+        "e2",
+        "d1",
+        "e3",
+        "e5",
+        "d3",
+        "e6",
+        "d4",
+    ]
+    assert [score.selected_rank_source for score in ranked[:2]] == ["curated", "curated"]
+    assert [score.final_rank for score in ranked] == list(range(1, 11))
+
+
+def test_feed_mixer_ignores_missing_curated_ids(settings):
+    settings.curated_top_influencer_ids = ["missing-id", "d2"]
+    service = FeedMixerService(settings)
+    scores = [
+        _score("e1", 0.99, 0.0, False),
+        _score("e2", 0.98, 0.0, False),
+        _score("d1", 0.50, 0.99, True),
+        _score("d2", 0.49, 0.98, True),
+    ]
+
+    ranked = service.rank_scores(scores)
+
+    assert ranked[0].influencer_id == "d2"
+    assert ranked[0].selected_rank_source == "curated"
+    assert [score.final_rank for score in ranked] == [1, 2, 3, 4]

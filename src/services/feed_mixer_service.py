@@ -12,6 +12,8 @@ class FeedMixerService:
             for token in settings.mixer_pattern.split(",")
             if token.strip()
         ]
+        self._curated_ids = list(settings.curated_top_influencer_ids)
+        self._curated_id_set = set(self._curated_ids)
 
     def rank_scores(self, scores: List[InfluencerScore]) -> List[InfluencerScore]:
         engagement_sorted = sorted(
@@ -50,9 +52,15 @@ class FeedMixerService:
             discovery_items=discovery_sorted,
             get_id=lambda score: score.influencer_id,
         )
+        mixed = self._apply_curated_prefix(
+            mixed,
+            get_id=lambda score: score.influencer_id,
+        )
         for idx, (score, source) in enumerate(mixed, start=1):
             score.final_rank = idx
-            score.selected_rank_source = source
+            score.selected_rank_source = (
+                "curated" if score.influencer_id in self._curated_id_set else source
+            )
 
         return [score for score, _ in mixed]
 
@@ -93,9 +101,15 @@ class FeedMixerService:
             discovery_items=discovery_sorted,
             get_id=lambda row: row["id"],
         )
+        mixed = self._apply_curated_prefix(
+            mixed,
+            get_id=lambda row: row["id"],
+        )
         for idx, (row, source) in enumerate(mixed, start=1):
             row["final_rank"] = idx
-            row["selected_rank_source"] = source
+            row["selected_rank_source"] = (
+                "curated" if row["id"] in self._curated_id_set else source
+            )
 
         return [row for row, _ in mixed]
 
@@ -173,6 +187,38 @@ class FeedMixerService:
             mixed.append((candidate, "engagement"))
 
         return mixed
+
+    def _apply_curated_prefix(
+        self,
+        items: Sequence[Tuple[T, str]],
+        get_id: Callable[[T], str],
+    ) -> List[Tuple[T, str]]:
+        if not self._curated_ids:
+            return list(items)
+
+        entry_by_id = {
+            get_id(item): (item, source)
+            for item, source in items
+        }
+        pinned_ids: set[str] = set()
+        pinned_entries: List[Tuple[T, str]] = []
+
+        for influencer_id in self._curated_ids:
+            entry = entry_by_id.get(influencer_id)
+            if entry is None or influencer_id in pinned_ids:
+                continue
+            pinned_entries.append(entry)
+            pinned_ids.add(influencer_id)
+
+        if not pinned_entries:
+            return list(items)
+
+        remainder = [
+            (item, source)
+            for item, source in items
+            if get_id(item) not in pinned_ids
+        ]
+        return pinned_entries + remainder
 
     @staticmethod
     def _next_unseen(

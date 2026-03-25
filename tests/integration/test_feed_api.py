@@ -17,6 +17,19 @@ def _build_test_app(kvrocks_client, repo) -> FastAPI:
     return app
 
 
+def _base_row(influencer_id: str, final_rank: int) -> dict:
+    return {
+        "id": influencer_id,
+        "name": influencer_id,
+        "display_name": influencer_id.upper(),
+        "avatar_url": f"https://example.com/{influencer_id}.png",
+        "description": influencer_id,
+        "category": "test",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "final_rank": final_rank,
+    }
+
+
 @pytest.mark.asyncio
 async def test_feed_api_and_health(kvrocks_client, repo, sample_feed_rows):
     influencers, scores = sample_feed_rows
@@ -64,3 +77,34 @@ async def test_feed_api_omits_metadata_fields_when_not_requested(
         payload = response.json()
         assert "scores" not in payload["influencers"][0]
         assert "signals" not in payload["influencers"][0]
+
+
+@pytest.mark.asyncio
+async def test_feed_api_paginates_persisted_curated_prefix_order(kvrocks_client, repo):
+    await repo.rewrite_ranked_feed_rows(
+        [
+            _base_row("curated-1", 1),
+            _base_row("curated-2", 2),
+            _base_row("algo-1", 3),
+        ]
+    )
+    app = _build_test_app(kvrocks_client, repo)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        first_page = await client.get(
+            "/api/v1/influencer-feed?offset=0&limit=2&with_metadata=false"
+        )
+        assert first_page.status_code == 200
+        assert [item["id"] for item in first_page.json()["influencers"]] == [
+            "curated-1",
+            "curated-2",
+        ]
+
+        second_page = await client.get(
+            "/api/v1/influencer-feed?offset=2&limit=1&with_metadata=false"
+        )
+        assert second_page.status_code == 200
+        assert [item["id"] for item in second_page.json()["influencers"]] == ["algo-1"]
