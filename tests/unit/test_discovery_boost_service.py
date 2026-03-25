@@ -68,6 +68,7 @@ class StubRepo:
 @pytest.mark.asyncio
 async def test_discovery_boost_refresh_updates_eligible_and_resets_expired(settings):
     now = datetime.now(timezone.utc)
+    settings.curated_top_influencer_ids = ["expired"]
     repo = StubRepo(now)
     service = DiscoveryBoostService(
         repo,
@@ -79,8 +80,10 @@ async def test_discovery_boost_refresh_updates_eligible_and_resets_expired(setti
     await service.refresh()
 
     assert repo.rewritten is not None
+    assert repo.rewritten[0]["id"] == "expired"
     row_map = {row["id"]: row for row in repo.rewritten}
     assert row_map["eligible"]["eligible_for_discovery"] is True
     assert row_map["eligible"]["discovery_score"] > 0.0
     assert row_map["expired"]["eligible_for_discovery"] is False
     assert row_map["expired"]["discovery_score"] == 0.0
+    assert row_map["expired"]["selected_rank_source"] == "curated"

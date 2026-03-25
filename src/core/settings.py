@@ -1,4 +1,6 @@
+import json
 from functools import lru_cache
+from typing import Any
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -73,6 +75,7 @@ class Settings(BaseSettings):
 
     serve_penalty_per_count: float = 0.0015
     mixer_pattern: str = "E,E,D,E,D,E,E,D,E,D"
+    curated_top_influencer_ids: list[str] = Field(default_factory=list)
 
     norm_lower_percentile: float = 5.0
     norm_upper_percentile: float = 95.0
@@ -107,6 +110,36 @@ class Settings(BaseSettings):
         if tokens.count("E") != 6 or tokens.count("D") != 4:
             raise ValueError("mixer_pattern must contain 6 E slots and 4 D slots")
         return ",".join(tokens)
+
+    @field_validator("curated_top_influencer_ids", mode="before")
+    @classmethod
+    def validate_curated_top_influencer_ids(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+
+        raw_items: list[Any]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    raw_items = stripped.split(",")
+                else:
+                    raw_items = parsed if isinstance(parsed, list) else [parsed]
+            else:
+                raw_items = stripped.split(",")
+        elif isinstance(value, (list, tuple)):
+            raw_items = list(value)
+        else:
+            raise ValueError("curated_top_influencer_ids must be a list or comma-separated string")
+
+        normalized = [str(item).strip() for item in raw_items if str(item).strip()]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("curated_top_influencer_ids must not contain duplicates")
+        return normalized
 
     @model_validator(mode="after")
     def validate_weight_groups(self) -> "Settings":
