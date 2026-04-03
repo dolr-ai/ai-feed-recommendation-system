@@ -7,24 +7,20 @@ The production Docker Compose stack sends container logs to `journald` on each h
 Services:
 
 - `recsys-app`
-- `recsys-caddy`
 
 Useful commands on a production server:
 
 ```bash
 journalctl CONTAINER_TAG=recsys-app -n 200 --no-pager
 journalctl CONTAINER_TAG=recsys-app -f
-
-journalctl CONTAINER_TAG=recsys-caddy -n 200 --no-pager
-journalctl CONTAINER_TAG=recsys-caddy -f
 ```
 
 You can still inspect Docker state with:
 
 ```bash
 cd /home/ai-feed-recommendation-system
-docker compose --profile edge ps
-docker compose --profile edge logs --tail=50 app caddy
+docker compose ps
+docker compose logs --tail=50 app
 ```
 
 ## Journald persistence
