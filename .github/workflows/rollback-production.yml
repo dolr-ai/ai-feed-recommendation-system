@@ -104,6 +104,14 @@ jobs:
             SCHEDULER_ENABLED='${{ vars.PROD_SCHEDULER_ENABLED || 'true' }}' \
             FEED_SYNC_RUN_ON_STARTUP='${{ vars.PROD_FEED_SYNC_RUN_ON_STARTUP || 'true' }}' \
             DISCOVERY_REFRESH_RUN_ON_STARTUP='${{ vars.PROD_DISCOVERY_REFRESH_RUN_ON_STARTUP || 'false' }}' \
+            SENTRY_ENABLED='${{ vars.PROD_SENTRY_ENABLED || 'true' }}' \
+            SENTRY_DSN='${{ secrets.PROD_SENTRY_DSN }}' \
+            SENTRY_ENVIRONMENT='${{ vars.PROD_SENTRY_ENVIRONMENT || 'production' }}' \
+            SENTRY_SEND_DEFAULT_PII='${{ vars.PROD_SENTRY_SEND_DEFAULT_PII || 'false' }}' \
+            SENTRY_ENABLE_LOGS='${{ vars.PROD_SENTRY_ENABLE_LOGS || 'true' }}' \
+            SENTRY_TRACES_SAMPLE_RATE='${{ vars.PROD_SENTRY_TRACES_SAMPLE_RATE || '0.05' }}' \
+            SENTRY_PROFILES_SAMPLE_RATE='${{ vars.PROD_SENTRY_PROFILES_SAMPLE_RATE || '0.0' }}' \
+            SENTRY_STARTUP_TEST_MESSAGE='${{ vars.PROD_SENTRY_STARTUP_TEST_MESSAGE || '' }}' \
             docker compose up -d --no-deps app &&
             sleep 30 &&
             docker compose ps
