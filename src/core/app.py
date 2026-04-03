@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from src.core.dependencies import build_runtime_objects
+from src.core.observability import emit_sentry_startup_test_event, init_sentry
 from src.core.settings import get_settings
 from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.influencer_feed_job import run_influencer_feed_sync
@@ -24,7 +25,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger_service = LoggerService()
     logger_service.configure(settings.log_level)
+    init_sentry(settings)
     log = logger_service.get("app")
+    if emit_sentry_startup_test_event(settings):
+        log.info("Sentry startup test message emitted")
     kvrocks = await build_kvrocks_client(settings)
     runtime = build_runtime_objects(kvrocks, settings)
     scheduler = None
@@ -89,6 +93,13 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    try:
+        settings = get_settings()
+    except Exception:
+        settings = None
+    if settings is not None:
+        LoggerService().configure(settings.log_level)
+    init_sentry(settings)
     app = FastAPI(title="Influencer Feed API", lifespan=lifespan)
     app.include_router(influencer_feed_router)
     app.include_router(health_router)

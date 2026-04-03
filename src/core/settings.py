@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     feed_max_limit: int = 100
 
     log_level: str = "INFO"
+    sentry_enabled: bool = False
+    sentry_dsn: str = ""
+    sentry_environment: str = "production"
+    sentry_send_default_pii: bool = False
+    sentry_enable_logs: bool = True
+    sentry_traces_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    sentry_profiles_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    sentry_startup_test_message: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
