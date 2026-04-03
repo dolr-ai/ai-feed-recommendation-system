@@ -19,6 +19,7 @@ env:
   APP_NAME: ai-feed-recommendation-system
   DEPLOY_DIR: /home/ai-feed-recommendation-system
   HOST_APP_PORT: "8000"
+  DEPLOY_USER: ${{ vars.BAREMETAL_SSH_USER || 'root' }}
 
 jobs:
   build_check:
@@ -111,15 +112,15 @@ jobs:
 
       - name: Check connectivity
         run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key -o ConnectTimeout=10 root@${{ matrix.server }} "echo 'Server connection successful'"
+          ssh -i ~/.ssh/hetzner_baremetal_key -o ConnectTimeout=10 ${{ env.DEPLOY_USER }}@${{ matrix.server }} "echo 'Server connection successful'"
 
       - name: Sync deployment files
         run: |
-          rsync -avz --delete -e "ssh -i ~/.ssh/hetzner_baremetal_key" ./deploy-baremetal/ root@${{ matrix.server }}:${{ env.DEPLOY_DIR }}/
+          rsync -avz --delete -e "ssh -i ~/.ssh/hetzner_baremetal_key" ./deploy-baremetal/ ${{ env.DEPLOY_USER }}@${{ matrix.server }}:${{ env.DEPLOY_DIR }}/
 
       - name: Log in to GHCR on server
         run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
+          ssh -i ~/.ssh/hetzner_baremetal_key ${{ env.DEPLOY_USER }}@${{ matrix.server }} "
             echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           "
 
@@ -127,18 +128,16 @@ jobs:
         env:
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
+          ssh -i ~/.ssh/hetzner_baremetal_key ${{ env.DEPLOY_USER }}@${{ matrix.server }} "
             mkdir -p ${{ env.DEPLOY_DIR }} &&
             cd ${{ env.DEPLOY_DIR }} &&
             APP_IMAGE=ghcr.io/${{ github.repository }} \
             IMAGE_TAG=${IMAGE_TAG} \
             HOST_APP_PORT=${{ env.HOST_APP_PORT }} \
-            docker compose --profile edge pull app caddy &&
+            docker compose pull app &&
             APP_IMAGE=ghcr.io/${{ github.repository }} \
             IMAGE_TAG=${IMAGE_TAG} \
             HOST_APP_PORT=${{ env.HOST_APP_PORT }} \
-            APP_DOMAIN='${{ vars.PROD_APP_DOMAIN }}' \
-            ACME_EMAIL='${{ vars.CADDY_ACME_EMAIL }}' \
             STORAGE_NAMESPACE='prod' \
             KVROCKS_HOST='${{ secrets.PROD_KVROCKS_HOST }}' \
             KVROCKS_PORT='${{ secrets.PROD_KVROCKS_PORT }}' \
@@ -152,24 +151,24 @@ jobs:
             SCHEDULER_ENABLED='${{ vars.PROD_SCHEDULER_ENABLED || 'true' }}' \
             FEED_SYNC_RUN_ON_STARTUP='${{ vars.PROD_FEED_SYNC_RUN_ON_STARTUP || 'true' }}' \
             DISCOVERY_REFRESH_RUN_ON_STARTUP='${{ vars.PROD_DISCOVERY_REFRESH_RUN_ON_STARTUP || 'false' }}' \
-            docker compose --profile edge up -d --remove-orphans &&
+            docker compose up -d --no-deps app &&
             sleep 30 &&
-            docker compose --profile edge ps
+            docker compose ps
           "
 
       - name: Verify deployment
         run: |
-          ssh -i ~/.ssh/hetzner_baremetal_key root@${{ matrix.server }} "
+          ssh -i ~/.ssh/hetzner_baremetal_key ${{ env.DEPLOY_USER }}@${{ matrix.server }} "
             cd ${{ env.DEPLOY_DIR }} &&
             for i in 1 2 3 4 5 6 7 8 9 10; do
-              if curl -sf http://127.0.0.1:80/health > /dev/null 2>&1; then
+              if curl -sf http://127.0.0.1:${{ env.HOST_APP_PORT }}/health > /dev/null 2>&1; then
                 echo 'Health check passed!'
                 exit 0
               fi
               echo 'Attempt failed, retrying in 3s...'
               sleep 3
             done
-            docker compose --profile edge logs --tail=30 app caddy
+            docker compose logs --tail=30 app
             exit 1
           "
 

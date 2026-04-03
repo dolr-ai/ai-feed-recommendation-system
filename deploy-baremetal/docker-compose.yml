@@ -35,35 +35,6 @@ services:
     networks:
       - recsys-net
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    profiles: ["edge"]
-    logging:
-      driver: journald
-      options:
-        tag: recsys-caddy
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      app:
-        condition: service_healthy
-    networks:
-      - recsys-net
-
 networks:
   recsys-net:
     driver: bridge
-
-volumes:
-  caddy_data:
-  caddy_config:
