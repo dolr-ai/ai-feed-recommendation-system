@@ -45,3 +45,26 @@ Production rollback is handled by the GitHub Actions workflow:
 - `Rollback Production`
 
 It redeploys a specific GHCR image tag to all production servers in rolling order.
+
+## SSH key safety
+
+Do not overwrite a user's `~/.ssh/authorized_keys` file when adding a deploy key. Overwriting that file removes all existing admin keys and can lock operators out of the host.
+
+Unsafe pattern:
+
+```bash
+tee ~/.ssh/authorized_keys >/dev/null
+```
+
+Safe approach:
+
+```bash
+./scripts/ensure_authorized_key.sh ansuman /path/to/public-key.pub
+```
+
+The helper script:
+
+- preserves existing keys
+- appends the new key
+- de-duplicates entries
+- restores correct ownership and `600` permissions on `authorized_keys`
