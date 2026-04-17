@@ -6,12 +6,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from src.core.dependencies import build_runtime_objects
-from src.core.observability import emit_sentry_startup_test_event, init_sentry
+from src.core.observability import (
+    emit_sentry_startup_test_event,
+    flush_sentry,
+    init_sentry,
+)
 from src.core.settings import get_settings
 from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.influencer_feed_job import run_influencer_feed_sync
 from src.routers.health import router as health_router
 from src.routers.influencer_feed import router as influencer_feed_router
+from src.routers.observability import router as observability_router
 from src.services.logger_service import LoggerService
 from src.utils.kvrocks import build_kvrocks_client
 
@@ -27,8 +32,12 @@ async def lifespan(app: FastAPI):
     logger_service.configure(settings.log_level)
     init_sentry(settings)
     log = logger_service.get("app")
-    if emit_sentry_startup_test_event(settings):
-        log.info("Sentry startup test message emitted")
+    startup_event_id = emit_sentry_startup_test_event(settings)
+    if startup_event_id:
+        log.info(
+            "Sentry startup test message emitted",
+            extra={"sentry_event_id": startup_event_id},
+        )
     kvrocks = await build_kvrocks_client(settings)
     runtime = build_runtime_objects(kvrocks, settings)
     scheduler = None
@@ -90,6 +99,7 @@ async def lifespan(app: FastAPI):
         await kvrocks.aclose()
     elif hasattr(kvrocks, "close"):
         await kvrocks.close()
+    flush_sentry(settings.sentry_shutdown_timeout_sec)
 
 
 def create_app() -> FastAPI:
@@ -100,9 +110,10 @@ def create_app() -> FastAPI:
     if settings is not None:
         LoggerService().configure(settings.log_level)
     init_sentry(settings)
-    app = FastAPI(title="Influencer Feed API", lifespan=lifespan)
+    app = FastAPI(title="Recommendation System API", lifespan=lifespan)
     app.include_router(influencer_feed_router)
     app.include_router(health_router)
+    app.include_router(observability_router)
     return app
 
 

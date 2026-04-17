@@ -113,7 +113,7 @@ class PipelineService:
             )
         except Exception as exc:
             step = self._infer_failed_step(exc)
-            self._log.error(
+            self._log.exception(
                 "Pipeline step failed",
                 extra={"step": step, "error": str(exc)},
             )

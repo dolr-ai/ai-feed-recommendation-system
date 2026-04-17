@@ -101,9 +101,15 @@ class Settings(BaseSettings):
     sentry_environment: str = "production"
     sentry_send_default_pii: bool = False
     sentry_enable_logs: bool = True
+    sentry_debug: bool = False
+    sentry_release: str = ""
+    sentry_server_name: str = ""
+    sentry_shutdown_timeout_sec: int = Field(default=5, ge=1, le=30)
     sentry_traces_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     sentry_profiles_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     sentry_startup_test_message: str = ""
+    sentry_verification_enabled: bool = False
+    sentry_verification_token: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
