@@ -18,10 +18,7 @@ async def run_discovery_boost_refresh(kvrocks_client) -> None:
     try:
         await runtime["discovery_boost_service"].refresh()
     except Exception as exc:
-        log.exception(
-            "Discovery refresh failed",
-            extra={"job": job_name, "error": str(exc)},
-        )
+        log.error("Discovery refresh failed", extra={"error": str(exc)})
     finally:
         await runtime["chat_api_client"].close()
         await release_job_lock(kvrocks_client, job_name)

@@ -22,10 +22,7 @@ async def run_influencer_feed_sync(kvrocks_client) -> None:
     try:
         await runtime["pipeline_service"].run()
     except Exception as exc:
-        log.exception(
-            "Pipeline failed",
-            extra={"job": job_name, "error": str(exc)},
-        )
+        log.error("Pipeline failed", extra={"error": str(exc)})
     finally:
         await runtime["chat_api_client"].close()
         await release_job_lock(kvrocks_client, job_name)
