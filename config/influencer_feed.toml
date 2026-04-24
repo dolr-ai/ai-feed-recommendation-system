@@ -9,7 +9,7 @@ kvrocks_password = ""
 kvrocks_tls_enabled = false
 kvrocks_cluster_enabled = false
 
-chat_api_base_url = "https://chat.yral.com"
+chat_api_base_url = "https://chat-ai.rishi.yral.com"
 chat_api_timeout = 30
 
 ic_gateway_base_url = "https://ic0.app"
