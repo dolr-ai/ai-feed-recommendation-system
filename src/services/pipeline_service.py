@@ -4,6 +4,10 @@ from src.models.influencer import Influencer, PipelineState
 from src.services.logger_service import LoggerService
 
 
+class EmptyInfluencerUniverseError(RuntimeError):
+    pass
+
+
 class PipelineService:
     def __init__(
         self,
@@ -32,6 +36,12 @@ class PipelineService:
                 self._chat_api_client.get_all_influencers,
             )
             influencers_map = self._build_influencer_map(base_records)
+            if not influencers_map:
+                exc = EmptyInfluencerUniverseError(
+                    f"{self._settings.chat_api_base_url.rstrip('/')}/api/v1/influencers returned zero active influencers"
+                )
+                setattr(exc, "pipeline_step", "fetch_influencers")
+                raise exc
             await self._save_step("fetch_influencers", True, len(influencers_map))
             self._log.info(
                 "Pipeline step completed",

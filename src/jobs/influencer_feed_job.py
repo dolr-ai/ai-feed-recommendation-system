@@ -1,3 +1,5 @@
+import sentry_sdk
+
 from src.core.dependencies import build_runtime_objects
 from src.core.settings import get_settings
 from src.services.logger_service import LoggerService
@@ -22,6 +24,7 @@ async def run_influencer_feed_sync(kvrocks_client) -> None:
     try:
         await runtime["pipeline_service"].run()
     except Exception as exc:
+        sentry_sdk.capture_exception(exc)
         log.error("Pipeline failed", extra={"error": str(exc)})
     finally:
         await runtime["chat_api_client"].close()
