@@ -25,4 +25,5 @@ async def run_influencer_feed_sync(kvrocks_client) -> None:
         log.error("Pipeline failed", extra={"error": str(exc)})
     finally:
         await runtime["chat_api_client"].close()
+        await runtime["clickhouse_client"].close()
         await release_job_lock(kvrocks_client, job_name)

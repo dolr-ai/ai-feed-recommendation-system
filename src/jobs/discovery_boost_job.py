@@ -21,4 +21,5 @@ async def run_discovery_boost_refresh(kvrocks_client) -> None:
         log.error("Discovery refresh failed", extra={"error": str(exc)})
     finally:
         await runtime["chat_api_client"].close()
+        await runtime["clickhouse_client"].close()
         await release_job_lock(kvrocks_client, job_name)

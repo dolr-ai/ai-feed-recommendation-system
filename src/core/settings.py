@@ -30,6 +30,73 @@ class Settings(BaseSettings):
     kvrocks_ssl_client_cert: str = ""
     kvrocks_ssl_client_key: str = ""
 
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 9000
+    clickhouse_database: str = "yral"
+    clickhouse_username: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_secure: bool = False
+    clickhouse_verify: bool = True
+    clickhouse_connect_timeout_sec: float = 10.0
+    clickhouse_query_timeout_sec: float = 30.0
+
+    feed_recsys_jobs_enabled: bool = False
+    feed_recsys_job_run_on_startup: bool = False
+    feed_recsys_popularity_sync_interval_sec: int = 21600
+    feed_recsys_freshness_sync_interval_sec: int = 21600
+    feed_recsys_bloom_sync_interval_sec: int = 21600
+    feed_recsys_ugc_sync_interval_sec: int = 21600
+    feed_recsys_ugc_discovery_sync_interval_sec: int = 1800
+    feed_recsys_exclude_sync_interval_sec: int = 1800
+    feed_recsys_ai_influencer_sync_interval_sec: int = 21600
+
+    feed_recsys_default_count: int = 100
+    feed_recsys_max_count: int = 500
+    feed_recsys_user_pool_capacity: int = 500
+    feed_recsys_refill_threshold: int = 200
+    feed_recsys_refill_max_attempts: int = 3
+    feed_recsys_following_sync_cooldown_sec: int = 600
+    feed_recsys_following_refill_threshold: int = 10
+    feed_recsys_following_fetch_limit: int = 1000
+    feed_recsys_following_first_segment_min: int = 3
+    feed_recsys_following_first_segment_max: int = 5
+    feed_recsys_following_first_segment_size: int = 10
+    feed_recsys_following_max_per_request: int = 30
+    feed_recsys_popularity_ratio: float = 0.60
+    feed_recsys_freshness_ratio: float = 0.40
+    feed_recsys_ugc_ratio: float = 0.30
+    feed_recsys_popularity_buckets: list[str] = Field(
+        default_factory=lambda: [
+            "99_100",
+            "90_99",
+            "80_90",
+            "70_80",
+            "60_70",
+            "50_60",
+            "40_50",
+            "30_40",
+            "20_30",
+            "10_20",
+            "0_10",
+        ]
+    )
+    feed_recsys_freshness_windows: list[str] = Field(
+        default_factory=lambda: ["l1d", "l7d", "l14d", "l30d", "l90d"]
+    )
+    feed_recsys_ugc_pool_limit: int = 10000
+    feed_recsys_ugc_discovery_pool_limit: int = 5000
+    feed_recsys_ugc_discovery_max_views: int = 200
+    feed_recsys_ugc_discovery_max_age_days: int = 7
+
+    feed_recsys_pool_ttl_sec: int = 3 * 24 * 60 * 60
+    feed_recsys_watched_ttl_sec: int = 24 * 60 * 60
+    feed_recsys_bloom_ttl_sec: int = 30 * 24 * 60 * 60
+    feed_recsys_bloom_error_rate: float = 0.01
+    feed_recsys_bloom_initial_capacity: int = 1_000_000
+    feed_recsys_bloom_expansion: int = 4
+    feed_recsys_percentile_pointer_ttl_sec: int = 24 * 60 * 60
+    feed_recsys_ugc_discovery_pool_ttl_sec: int = 2 * 60 * 60
+
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
 

@@ -8,8 +8,18 @@ from fastapi import FastAPI
 from src.core.dependencies import build_runtime_objects
 from src.core.observability import emit_sentry_startup_test_event, init_sentry
 from src.core.settings import get_settings
+from src.jobs.feed_recsys_jobs import (
+    run_feed_recsys_ai_influencer_sync,
+    run_feed_recsys_bloom_sync,
+    run_feed_recsys_exclude_sync,
+    run_feed_recsys_freshness_sync,
+    run_feed_recsys_popularity_sync,
+    run_feed_recsys_ugc_discovery_sync,
+    run_feed_recsys_ugc_sync,
+)
 from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.influencer_feed_job import run_influencer_feed_sync
+from src.routers.feed_recsys import router as feed_recsys_router
 from src.routers.health import router as health_router
 from src.routers.influencer_feed import router as influencer_feed_router
 from src.services.logger_service import LoggerService
@@ -76,6 +86,75 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Scheduler disabled; no background jobs scheduled")
 
+    if settings.scheduler_enabled and settings.feed_recsys_jobs_enabled:
+        scheduler = scheduler or AsyncIOScheduler(
+            job_defaults={
+                "misfire_grace_time": settings.scheduler_misfire_grace_time_sec
+            }
+        )
+        scheduler.add_job(
+            run_feed_recsys_popularity_sync,
+            "interval",
+            seconds=settings.feed_recsys_popularity_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_popularity_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_freshness_sync,
+            "interval",
+            seconds=settings.feed_recsys_freshness_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_freshness_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_bloom_sync,
+            "interval",
+            seconds=settings.feed_recsys_bloom_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_bloom_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_ugc_sync,
+            "interval",
+            seconds=settings.feed_recsys_ugc_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_ugc_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_ugc_discovery_sync,
+            "interval",
+            seconds=settings.feed_recsys_ugc_discovery_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_ugc_discovery_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_exclude_sync,
+            "interval",
+            seconds=settings.feed_recsys_exclude_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_exclude_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        scheduler.add_job(
+            run_feed_recsys_ai_influencer_sync,
+            "interval",
+            seconds=settings.feed_recsys_ai_influencer_sync_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_ai_influencer_sync",
+            next_run_time=scheduler_next_run_time(settings.feed_recsys_job_run_on_startup),
+        )
+        if not scheduler.running:
+            scheduler.start()
+        log.info(
+            "Feed recsys jobs scheduled",
+            extra={"run_on_startup": settings.feed_recsys_job_run_on_startup},
+        )
+
     app.state.kvrocks = kvrocks
     app.state.scheduler = scheduler
     for key, value in runtime.items():
@@ -86,6 +165,7 @@ async def lifespan(app: FastAPI):
     if scheduler is not None:
         scheduler.shutdown(wait=False)
     await runtime["chat_api_client"].close()
+    await runtime["clickhouse_client"].close()
     if hasattr(kvrocks, "aclose"):
         await kvrocks.aclose()
     elif hasattr(kvrocks, "close"):
@@ -100,8 +180,9 @@ def create_app() -> FastAPI:
     if settings is not None:
         LoggerService().configure(settings.log_level)
     init_sentry(settings)
-    app = FastAPI(title="Influencer Feed API", lifespan=lifespan)
+    app = FastAPI(title="Feed Recsys API", lifespan=lifespan)
     app.include_router(influencer_feed_router)
+    app.include_router(feed_recsys_router)
     app.include_router(health_router)
     return app
 
