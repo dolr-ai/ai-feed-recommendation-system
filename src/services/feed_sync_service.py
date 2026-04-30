@@ -11,11 +11,13 @@ class FeedSyncService:
     def __init__(
         self,
         clickhouse_feed_repository,
+        clickhouse_video_metadata_repository,
         kv_feed_repository,
         chat_api_client,
         settings,
     ):
         self._clickhouse_feed_repository = clickhouse_feed_repository
+        self._clickhouse_video_metadata_repository = clickhouse_video_metadata_repository
         self._kv_feed_repository = kv_feed_repository
         self._chat_api_client = chat_api_client
         self._settings = settings
@@ -189,9 +191,23 @@ class FeedSyncService:
         batch_size = 500
         for index in range(0, len(unique_video_ids), batch_size):
             batch = unique_video_ids[index:index + batch_size]
-            metadata = await self._kv_feed_repository.get_video_metadata_batch(batch)
-            result.extend([video_id for video_id in batch if video_id in metadata])
+            metadata = await self._clickhouse_video_metadata_repository.get_video_metadata_batch(
+                batch
+            )
+            result.extend(
+                [
+                    video_id
+                    for video_id in batch
+                    if self._has_required_metadata(metadata.get(video_id))
+                ]
+            )
         return result
+
+    @staticmethod
+    def _has_required_metadata(metadata: Optional[dict]) -> bool:
+        if not metadata:
+            return False
+        return bool(metadata.get("post_id") and metadata.get("publisher_user_id"))
 
     def _bucket_popular_video_ids(self, rows: list[dict]) -> dict[str, list[str]]:
         buckets = {bucket: [] for bucket in self._settings.feed_recsys_popularity_buckets}

@@ -150,41 +150,6 @@ async def test_replace_global_pool_rewrites_pool_with_expiry_scores(monkeypatch)
     )
 
 
-async def test_get_video_metadata_batch_normalizes_canister_fields():
-    client = FakeClient(
-        pipeline_results=[
-            [
-                {
-                    "upload_canister_id": "cid-1",
-                    "post_id": "11",
-                    "publisher_user_id": "user-1",
-                },
-                {},
-                {
-                    "canister_id": "cid-3",
-                    "post_id": "33",
-                },
-            ]
-        ]
-    )
-    repo = KVFeedRepository(client, build_settings())
-
-    metadata = await repo.get_video_metadata_batch(["video-1", "video-2", "video-3"])
-
-    assert metadata == {
-        "video-1": {
-            "canister_id": "cid-1",
-            "post_id": "11",
-            "publisher_user_id": "user-1",
-        },
-        "video-3": {
-            "canister_id": "cid-3",
-            "post_id": "33",
-            "publisher_user_id": "",
-        },
-    }
-
-
 async def test_check_ai_influencer_ids_uses_set_membership():
     client = FakeClient()
     client.smismember_result = [1, 0]

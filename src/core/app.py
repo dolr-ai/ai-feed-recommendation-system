@@ -5,7 +5,7 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
-from src.core.dependencies import build_runtime_objects
+from src.core.dependencies import build_runtime_objects, close_runtime_objects
 from src.core.observability import emit_sentry_startup_test_event, init_sentry
 from src.core.settings import get_settings
 from src.jobs.feed_recsys_jobs import (
@@ -164,8 +164,7 @@ async def lifespan(app: FastAPI):
 
     if scheduler is not None:
         scheduler.shutdown(wait=False)
-    await runtime["chat_api_client"].close()
-    await runtime["clickhouse_client"].close()
+    await close_runtime_objects(runtime)
     if hasattr(kvrocks, "aclose"):
         await kvrocks.aclose()
     elif hasattr(kvrocks, "close"):

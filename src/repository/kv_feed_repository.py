@@ -14,7 +14,6 @@ from src.utils.feed_recsys_keys import (
     user_pool_key,
     user_popularity_pointer_key,
     user_watched_key,
-    video_metadata_key,
 )
 
 
@@ -145,26 +144,6 @@ class KVFeedRepository:
             user_id: bool(is_member)
             for user_id, is_member in zip(user_ids, membership)
         }
-
-    async def get_video_metadata_batch(self, video_ids: list[str]) -> dict[str, dict]:
-        if not video_ids:
-            return {}
-
-        pipe = self._client.pipeline()
-        for video_id in video_ids:
-            pipe.hgetall(video_metadata_key(video_id))
-        results = await pipe.execute()
-
-        metadata: dict[str, dict] = {}
-        for video_id, row in zip(video_ids, results):
-            if not row:
-                continue
-            metadata[video_id] = {
-                "canister_id": row.get("canister_id") or row.get("upload_canister_id"),
-                "post_id": row.get("post_id"),
-                "publisher_user_id": row.get("publisher_user_id", ""),
-            }
-        return metadata
 
     async def user_bloom_exists(self, user_id: str) -> bool:
         return bool(await self._client.exists(user_bloom_key(self._settings, user_id)))

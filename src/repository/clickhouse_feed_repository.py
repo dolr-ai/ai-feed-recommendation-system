@@ -344,11 +344,11 @@ class ClickHouseFeedRepository:
 
     def _valid_videos_cte(self, include_approval_source: bool) -> str:
         source_conditions = [
-            "aug.video_id IS NOT NULL",
-            "buc.video_id IS NOT NULL",
+            "notEmpty(aug.video_id)",
+            "notEmpty(buc.video_id)",
         ]
         if include_approval_source:
-            source_conditions.append("uca_approved.video_id IS NOT NULL")
+            source_conditions.append("notEmpty(uca_approved.video_id)")
 
         valid_source_clause = "\n          OR ".join(source_conditions)
         return dedent(
@@ -367,8 +367,8 @@ class ClickHouseFeedRepository:
                     ON vu.video_id = rv.video_id
                 LEFT JOIN excluded_videos ev
                     ON vu.video_id = ev.video_id
-                WHERE rv.video_id IS NULL
-                  AND ev.video_id IS NULL
+                WHERE empty(rv.video_id)
+                  AND empty(ev.video_id)
                   AND (
                       {valid_source_clause}
                   )

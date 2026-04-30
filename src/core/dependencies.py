@@ -6,8 +6,12 @@ from src.clients.clickhouse_client import build_clickhouse_client
 from src.core.settings import get_settings
 from src.repository.checkpoint_repository import CheckpointRepository
 from src.repository.clickhouse_feed_repository import ClickHouseFeedRepository
+from src.repository.clickhouse_video_metadata_repository import (
+    ClickHouseVideoMetadataRepository,
+)
 from src.repository.influencer_repository import InfluencerRepository
 from src.repository.kv_feed_repository import KVFeedRepository
+from src.repository.kv_video_metadata_repository import KVVideoMetadataRepository
 from src.services.feed_pool_service import FeedPoolService
 from src.services.feed_sync_service import FeedSyncService
 from src.services.discovery_boost_service import DiscoveryBoostService
@@ -17,6 +21,7 @@ from src.services.pipeline_service import PipelineService
 from src.services.recommend_with_metadata_service import RecommendWithMetadataService
 from src.services.scoring_service import ScoringService
 from src.services.video_metadata_service import VideoMetadataService
+from src.utils.kvrocks import build_video_metadata_kvrocks_client
 
 
 def build_runtime_objects(kvrocks_client, settings=None) -> dict:
@@ -26,7 +31,16 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         clickhouse_client,
         resolved_settings,
     )
+    clickhouse_video_metadata_repository = ClickHouseVideoMetadataRepository(
+        clickhouse_client,
+        resolved_settings,
+    )
     kv_feed_repository = KVFeedRepository(kvrocks_client, resolved_settings)
+    video_metadata_kvrocks_client = build_video_metadata_kvrocks_client(resolved_settings)
+    kv_video_metadata_repository = KVVideoMetadataRepository(
+        video_metadata_kvrocks_client,
+        resolved_settings,
+    )
     repo = InfluencerRepository(kvrocks_client, resolved_settings)
     checkpoint_repo = CheckpointRepository(kvrocks_client, resolved_settings)
     chat_api_client = ChatApiClient(resolved_settings)
@@ -36,11 +50,17 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
     feed_service = FeedService(repo)
     feed_sync_service = FeedSyncService(
         clickhouse_feed_repository=clickhouse_feed_repository,
+        clickhouse_video_metadata_repository=clickhouse_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
         chat_api_client=chat_api_client,
         settings=resolved_settings,
     )
-    video_metadata_service = VideoMetadataService(kv_feed_repository)
+    video_metadata_service = VideoMetadataService(
+        clickhouse_video_metadata_repository=clickhouse_video_metadata_repository,
+        kv_video_metadata_repository=kv_video_metadata_repository,
+        kv_feed_repository=kv_feed_repository,
+        settings=resolved_settings,
+    )
     feed_pool_service = FeedPoolService(
         kv_feed_repository=kv_feed_repository,
         feed_sync_service=feed_sync_service,
@@ -69,7 +89,10 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         "settings": resolved_settings,
         "clickhouse_client": clickhouse_client,
         "clickhouse_feed_repository": clickhouse_feed_repository,
+        "clickhouse_video_metadata_repository": clickhouse_video_metadata_repository,
         "kv_feed_repository": kv_feed_repository,
+        "video_metadata_kvrocks_client": video_metadata_kvrocks_client,
+        "kv_video_metadata_repository": kv_video_metadata_repository,
         "repo": repo,
         "checkpoint_repo": checkpoint_repo,
         "chat_api_client": chat_api_client,
@@ -84,6 +107,20 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         "discovery_boost_service": discovery_boost_service,
         "pipeline_service": pipeline_service,
     }
+
+
+async def close_runtime_objects(runtime: dict) -> None:
+    await runtime["chat_api_client"].close()
+    await runtime["clickhouse_client"].close()
+
+    video_metadata_kvrocks_client = runtime.get("video_metadata_kvrocks_client")
+    if video_metadata_kvrocks_client is None:
+        return
+
+    if hasattr(video_metadata_kvrocks_client, "aclose"):
+        await video_metadata_kvrocks_client.aclose()
+    elif hasattr(video_metadata_kvrocks_client, "close"):
+        await video_metadata_kvrocks_client.close()
 
 
 def get_kvrocks(request: Request):

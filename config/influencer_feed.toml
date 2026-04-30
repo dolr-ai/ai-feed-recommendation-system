@@ -8,6 +8,14 @@ kvrocks_port = 6666
 kvrocks_password = ""
 kvrocks_tls_enabled = false
 kvrocks_cluster_enabled = false
+video_metadata_kvrocks_hosts = []
+video_metadata_kvrocks_port = 6666
+video_metadata_kvrocks_password = ""
+video_metadata_kvrocks_tls_enabled = true
+video_metadata_kvrocks_cluster_enabled = true
+video_metadata_kvrocks_ssl_ca_cert = ""
+video_metadata_kvrocks_ssl_client_cert = ""
+video_metadata_kvrocks_ssl_client_key = ""
 
 clickhouse_host = "127.0.0.1"
 clickhouse_port = 9000

@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from src.config import load_env_overrides, load_file_config
 
@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     kvrocks_ssl_ca_cert: str = ""
     kvrocks_ssl_client_cert: str = ""
     kvrocks_ssl_client_key: str = ""
+    video_metadata_kvrocks_hosts: list[str] = Field(default_factory=list)
+    video_metadata_kvrocks_port: int = 6666
+    video_metadata_kvrocks_password: str = ""
+    video_metadata_kvrocks_tls_enabled: bool = True
+    video_metadata_kvrocks_cluster_enabled: bool = True
+    video_metadata_kvrocks_ssl_ca_cert: str = ""
+    video_metadata_kvrocks_ssl_client_cert: str = ""
+    video_metadata_kvrocks_ssl_client_key: str = ""
 
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 9000
@@ -186,9 +194,13 @@ class Settings(BaseSettings):
             raise ValueError("mixer_pattern must contain 6 E slots and 4 D slots")
         return ",".join(tokens)
 
-    @field_validator("curated_top_influencer_ids", mode="before")
+    @field_validator(
+        "curated_top_influencer_ids",
+        "video_metadata_kvrocks_hosts",
+        mode="before",
+    )
     @classmethod
-    def validate_curated_top_influencer_ids(cls, value: Any) -> list[str]:
+    def validate_string_lists(cls, value: Any, info: ValidationInfo) -> list[str]:
         if value is None or value == "":
             return []
 
@@ -209,11 +221,13 @@ class Settings(BaseSettings):
         elif isinstance(value, (list, tuple)):
             raw_items = list(value)
         else:
-            raise ValueError("curated_top_influencer_ids must be a list or comma-separated string")
+            raise ValueError(
+                f"{info.field_name} must be a list or comma-separated string"
+            )
 
         normalized = [str(item).strip() for item in raw_items if str(item).strip()]
         if len(normalized) != len(set(normalized)):
-            raise ValueError("curated_top_influencer_ids must not contain duplicates")
+            raise ValueError(f"{info.field_name} must not contain duplicates")
         return normalized
 
     @model_validator(mode="after")

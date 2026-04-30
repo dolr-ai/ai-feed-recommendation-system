@@ -1,4 +1,4 @@
-from src.core.dependencies import build_runtime_objects
+from src.core.dependencies import build_runtime_objects, close_runtime_objects
 from src.core.settings import get_settings
 from src.services.logger_service import LoggerService
 from src.utils.feed_recsys_keys import job_lock_key
@@ -90,6 +90,5 @@ async def _run_locked_job(
         log.error("Feed recsys job failed", extra={"job": job_name, "error": str(exc)})
         raise
     finally:
-        await runtime["chat_api_client"].close()
-        await runtime["clickhouse_client"].close()
+        await close_runtime_objects(runtime)
         await kvrocks_client.delete(lock_key)
