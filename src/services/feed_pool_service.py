@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 
@@ -12,6 +13,7 @@ class FeedPoolService:
         self._feed_sync_service = feed_sync_service
         self._settings = settings
         self._log = LoggerService().get("feed_recsys_pool")
+        self._background_refill_tasks: set[asyncio.Task] = set()
 
     async def get_video_ids(
         self,
@@ -119,8 +121,20 @@ class FeedPoolService:
                 needed = count - len(selected)
                 batch = filtered[:needed]
                 await self._kv_feed_repository.remove_user_pool_videos(user_id, pool_name, batch)
-                await self._kv_feed_repository.add_watched_videos(user_id, batch)
+                await self._kv_feed_repository.add_served_recent_videos(user_id, batch)
                 selected.extend(batch)
+
+                remaining_count = await self._kv_feed_repository.get_user_pool_size(
+                    user_id,
+                    pool_name,
+                    current_time=int(time.time()),
+                )
+                await self._maybe_schedule_background_refill(
+                    user_id,
+                    pool_name,
+                    request_count=count,
+                    remaining_count=remaining_count,
+                )
 
             if len(selected) < count:
                 attempts += 1
@@ -130,8 +144,8 @@ class FeedPoolService:
 
     async def _bootstrap_if_needed(self, user_id: str) -> None:
         bloom_exists = await self._kv_feed_repository.user_bloom_exists(user_id)
-        watched_count = await self._kv_feed_repository.get_watched_count(user_id)
-        if bloom_exists or watched_count > 0:
+        served_recent_count = await self._kv_feed_repository.get_served_recent_count(user_id)
+        if bloom_exists or served_recent_count > 0:
             return
 
         await self._kv_feed_repository.ensure_user_bloom(user_id)
@@ -278,10 +292,78 @@ class FeedPoolService:
 
         unique_ids = list(dict.fromkeys(video_ids))
         filtered_ids = await self._kv_feed_repository.filter_excluded_videos(unique_ids)
-        watched_status = await self._kv_feed_repository.check_user_watched(user_id, filtered_ids)
-        unwatched_ids = [video_id for video_id in filtered_ids if not watched_status.get(video_id, False)]
-        bloom_status = await self._kv_feed_repository.check_user_bloom(user_id, unwatched_ids)
-        return [video_id for video_id in unwatched_ids if not bloom_status.get(video_id, False)]
+        served_recent_status = await self._kv_feed_repository.check_user_served_recent(
+            user_id,
+            filtered_ids,
+        )
+        unserved_ids = [
+            video_id
+            for video_id in filtered_ids
+            if not served_recent_status.get(video_id, False)
+        ]
+        bloom_status = await self._kv_feed_repository.check_user_bloom(user_id, unserved_ids)
+        return [video_id for video_id in unserved_ids if not bloom_status.get(video_id, False)]
+
+    async def close(self) -> None:
+        tasks = list(self._background_refill_tasks)
+        if not tasks:
+            return
+
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_refill_tasks.clear()
+
+    async def _maybe_schedule_background_refill(
+        self,
+        user_id: str,
+        pool_name: str,
+        request_count: int,
+        remaining_count: int,
+    ) -> None:
+        if pool_name == "following":
+            threshold = max(
+                self._settings.feed_recsys_following_refill_threshold,
+                request_count,
+            )
+        else:
+            threshold = max(
+                self._settings.feed_recsys_background_refill_threshold,
+                request_count * 2,
+            )
+
+        if remaining_count >= threshold:
+            return
+
+        target = max(
+            self._settings.feed_recsys_background_refill_target,
+            request_count * 4,
+        )
+        task = asyncio.create_task(self._run_background_refill(user_id, pool_name, target))
+        self._background_refill_tasks.add(task)
+        task.add_done_callback(self._background_refill_tasks.discard)
+
+    async def _run_background_refill(self, user_id: str, pool_name: str, target: int) -> None:
+        acquired = await self._kv_feed_repository.acquire_refill_lock(user_id, pool_name)
+        if not acquired:
+            return
+
+        try:
+            remaining_count = await self._kv_feed_repository.get_user_pool_size(
+                user_id,
+                pool_name,
+                current_time=int(time.time()),
+            )
+            if remaining_count >= self._settings.feed_recsys_background_refill_threshold:
+                return
+            await self._refill_pool(user_id, pool_name, target)
+        except Exception as exc:
+            self._log.warning(
+                "Feed recsys background refill failed",
+                extra={"user_id": user_id, "pool_name": pool_name, "error": str(exc)},
+            )
+        finally:
+            await self._kv_feed_repository.release_refill_lock(user_id, pool_name)
 
     @staticmethod
     def _intersperse_ugc(videos: list[str], ugc_videos: list[str]) -> list[str]:

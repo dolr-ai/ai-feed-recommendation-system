@@ -6,6 +6,9 @@ from src.utils.feed_recsys_keys import (
     global_pool_key,
     ugc_discovery_pushes_key,
     ugc_discovery_timestamps_key,
+    user_refill_lock_key,
+    user_served_recent_key,
+    video_view_count_key,
 )
 
 
@@ -46,6 +49,14 @@ class FakePipeline:
         self.ops.append(("hdel", key, fields))
         return self
 
+    def get(self, key):
+        self.ops.append(("get", key))
+        return self
+
+    def set(self, key, value, ex=None):
+        self.ops.append(("set", key, value, ex))
+        return self
+
     async def execute(self):
         return self.results
 
@@ -57,10 +68,12 @@ class FakeClient:
         self.exists_value = 0
         self.smismember_result = []
         self.get_value = None
+        self.mget_values = []
         self.ttl_value = -2
         self.hgetall_result = {}
         self.zrangebyscore_result = []
         self.zadd_return = 0
+        self.zcount_value = 0
         self.expire_calls = []
         self.set_calls = []
         self.delete_calls = []
@@ -85,8 +98,8 @@ class FakeClient:
     async def get(self, key):
         return self.get_value
 
-    async def set(self, key, value, ex=None):
-        self.set_calls.append((key, value, ex))
+    async def set(self, key, value, ex=None, nx=False):
+        self.set_calls.append((key, value, ex, nx))
         return True
 
     async def ttl(self, key):
@@ -102,6 +115,9 @@ class FakeClient:
         self.last_zadd = (key, mapping)
         return self.zadd_return
 
+    async def zcount(self, key, min_score, max_score):
+        return self.zcount_value
+
     async def expire(self, key, ttl):
         self.expire_calls.append((key, ttl))
         return True
@@ -109,6 +125,11 @@ class FakeClient:
     async def delete(self, *keys):
         self.delete_calls.append(keys)
         return len(keys)
+
+    async def mget(self, keys):
+        self.mget_calls = getattr(self, "mget_calls", [])
+        self.mget_calls.append(keys)
+        return self.mget_values
 
     async def execute_command(self, *args):
         self.execute_command_calls.append(args)
@@ -223,5 +244,97 @@ async def test_set_popularity_pointer_preserves_existing_ttl():
             "staging:feed_recsys:{user:user-7}:pop_percentile_pointer",
             "95_99",
             45,
+            False,
         )
+    ]
+
+
+async def test_add_served_recent_videos_uses_served_recent_key(monkeypatch):
+    monkeypatch.setattr(kv_feed_repository_module.time, "time", lambda: 3000)
+    client = FakeClient()
+    client.zadd_return = 2
+    settings = build_settings(storage_namespace="staging")
+    repo = KVFeedRepository(client, settings)
+
+    count = await repo.add_served_recent_videos("user-1", ["video-1", "video-2", "video-1"])
+
+    assert count == 2
+    assert client.last_zadd == (
+        user_served_recent_key(settings, "user-1"),
+        {"video-1": 89400.0, "video-2": 89400.0},
+    )
+    assert client.expire_calls == [
+        (user_served_recent_key(settings, "user-1"), settings.feed_recsys_served_recent_ttl_sec)
+    ]
+
+
+async def test_acquire_refill_lock_uses_nx_set():
+    client = FakeClient()
+    settings = build_settings(storage_namespace="staging")
+    repo = KVFeedRepository(client, settings)
+
+    acquired = await repo.acquire_refill_lock("user-9", "ugc", ttl_sec=25)
+
+    assert acquired is True
+    assert client.set_calls == [
+        (
+            user_refill_lock_key(settings, "user-9", "ugc"),
+            "1",
+            25,
+            True,
+        )
+    ]
+
+
+async def test_get_cached_video_view_counts_reads_json_payloads():
+    client = FakeClient()
+    client.mget_values = [
+        '{"num_views_loggedin": 7, "num_views_all": 19}',
+        None,
+        '{"num_views_loggedin": 0, "num_views_all": 5}',
+    ]
+    settings = build_settings(storage_namespace="staging")
+    repo = KVFeedRepository(client, settings)
+
+    result = await repo.get_cached_video_view_counts(["video-1", "video-2", "video-3"])
+
+    assert result == {
+        "video-1": {"num_views_loggedin": 7, "num_views_all": 19},
+        "video-3": {"num_views_loggedin": 0, "num_views_all": 5},
+    }
+    assert client.mget_calls == [[
+        video_view_count_key(settings, "video-1"),
+        video_view_count_key(settings, "video-2"),
+        video_view_count_key(settings, "video-3"),
+    ]]
+
+
+async def test_cache_video_view_counts_sets_ttl_payloads():
+    client = FakeClient()
+    settings = build_settings(storage_namespace="staging")
+    repo = KVFeedRepository(client, settings)
+
+    count = await repo.cache_video_view_counts(
+        {
+            "video-1": {"num_views_loggedin": 3, "num_views_all": 8},
+            "video-2": {"num_views_loggedin": 0, "num_views_all": 1},
+        },
+        ttl_sec=120,
+    )
+
+    assert count == 2
+    pipe = client.pipelines[0]
+    assert pipe.ops == [
+        (
+            "set",
+            video_view_count_key(settings, "video-1"),
+            '{"num_views_loggedin": 3, "num_views_all": 8}',
+            120,
+        ),
+        (
+            "set",
+            video_view_count_key(settings, "video-2"),
+            '{"num_views_loggedin": 0, "num_views_all": 1}',
+            120,
+        ),
     ]

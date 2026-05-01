@@ -37,11 +37,14 @@ feed_recsys_ugc_discovery_sync_interval_sec = 1800
 feed_recsys_exclude_sync_interval_sec = 1800
 feed_recsys_ai_influencer_sync_interval_sec = 21600
 
-feed_recsys_default_count = 100
+feed_recsys_default_count = 20
 feed_recsys_max_count = 500
 feed_recsys_user_pool_capacity = 500
 feed_recsys_refill_threshold = 200
 feed_recsys_refill_max_attempts = 3
+feed_recsys_background_refill_threshold = 40
+feed_recsys_background_refill_target = 120
+feed_recsys_refill_lock_ttl_sec = 30
 feed_recsys_following_sync_cooldown_sec = 600
 feed_recsys_following_refill_threshold = 10
 feed_recsys_following_fetch_limit = 1000
@@ -72,16 +75,21 @@ feed_recsys_ugc_discovery_max_views = 200
 feed_recsys_ugc_discovery_max_age_days = 7
 
 feed_recsys_pool_ttl_sec = 259200
-feed_recsys_watched_ttl_sec = 86400
+feed_recsys_served_recent_ttl_sec = 86400
 feed_recsys_bloom_ttl_sec = 2592000
 feed_recsys_bloom_error_rate = 0.01
 feed_recsys_bloom_initial_capacity = 1000000
 feed_recsys_bloom_expansion = 4
 feed_recsys_percentile_pointer_ttl_sec = 86400
 feed_recsys_ugc_discovery_pool_ttl_sec = 7200
+feed_recsys_view_count_ttl_sec = 43200
+feed_recsys_view_count_prewarm_enabled = true
+feed_recsys_view_count_prewarm_batch_size = 500
 
 chat_api_base_url = "https://chat-ai.rishi.yral.com"
 chat_api_timeout = 30
+offchain_agent_base_url = "https://offchain.yral.com"
+offchain_agent_timeout = 15
 
 ic_gateway_base_url = "https://ic0.app"
 profile_canister_id = "ivkka-7qaaa-aaaas-qbg3q-cai"

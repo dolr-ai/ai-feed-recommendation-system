@@ -3,6 +3,7 @@ from fastapi import Request
 from src.clients.canister_client import CanisterClient
 from src.clients.chat_api_client import ChatApiClient
 from src.clients.clickhouse_client import build_clickhouse_client
+from src.clients.offchain_rewards_client import OffchainRewardsClient
 from src.core.settings import get_settings
 from src.repository.checkpoint_repository import CheckpointRepository
 from src.repository.clickhouse_feed_repository import ClickHouseFeedRepository
@@ -44,6 +45,7 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
     repo = InfluencerRepository(kvrocks_client, resolved_settings)
     checkpoint_repo = CheckpointRepository(kvrocks_client, resolved_settings)
     chat_api_client = ChatApiClient(resolved_settings)
+    offchain_rewards_client = OffchainRewardsClient(resolved_settings)
     canister_client = CanisterClient(resolved_settings)
     scoring_service = ScoringService(resolved_settings)
     feed_mixer_service = FeedMixerService(resolved_settings)
@@ -53,12 +55,14 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         clickhouse_video_metadata_repository=clickhouse_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
         chat_api_client=chat_api_client,
+        offchain_rewards_client=offchain_rewards_client,
         settings=resolved_settings,
     )
     video_metadata_service = VideoMetadataService(
         clickhouse_video_metadata_repository=clickhouse_video_metadata_repository,
         kv_video_metadata_repository=kv_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
+        offchain_rewards_client=offchain_rewards_client,
         settings=resolved_settings,
     )
     feed_pool_service = FeedPoolService(
@@ -96,6 +100,7 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         "repo": repo,
         "checkpoint_repo": checkpoint_repo,
         "chat_api_client": chat_api_client,
+        "offchain_rewards_client": offchain_rewards_client,
         "canister_client": canister_client,
         "scoring_service": scoring_service,
         "feed_mixer_service": feed_mixer_service,
@@ -110,7 +115,12 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
 
 
 async def close_runtime_objects(runtime: dict) -> None:
+    feed_pool_service = runtime.get("feed_pool_service")
+    if feed_pool_service is not None and hasattr(feed_pool_service, "close"):
+        await feed_pool_service.close()
+
     await runtime["chat_api_client"].close()
+    await runtime["offchain_rewards_client"].close()
     await runtime["clickhouse_client"].close()
 
     video_metadata_kvrocks_client = runtime.get("video_metadata_kvrocks_client")

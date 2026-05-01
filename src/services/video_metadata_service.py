@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from src.schemas.feed_recsys import FeedVideoMetadata
 from src.services.logger_service import LoggerService
 
@@ -10,11 +12,13 @@ class VideoMetadataService:
         clickhouse_video_metadata_repository,
         kv_video_metadata_repository,
         kv_feed_repository,
+        offchain_rewards_client,
         settings,
     ):
         self._clickhouse_video_metadata_repository = clickhouse_video_metadata_repository
         self._kv_video_metadata_repository = kv_video_metadata_repository
         self._kv_feed_repository = kv_feed_repository
+        self._offchain_rewards_client = offchain_rewards_client
         self._settings = settings
         self._log = LoggerService().get("feed_recsys_metadata")
 
@@ -22,12 +26,16 @@ class VideoMetadataService:
         if not video_ids:
             return []
 
-        metadata = await self._get_resolved_metadata(video_ids)
+        metadata, view_counts = await asyncio.gather(
+            self._get_resolved_metadata(video_ids),
+            self._get_view_counts(video_ids),
+        )
         ordered_rows = []
         for video_id in video_ids:
             row = metadata.get(video_id)
             if not self._has_required_metadata(row):
                 continue
+            counts = view_counts.get(video_id, {})
             ordered_rows.append(
                 {
                     "video_id": video_id,
@@ -36,8 +44,8 @@ class VideoMetadataService:
                     ),
                     "post_id": str(row.get("post_id") or ""),
                     "publisher_user_id": str(row.get("publisher_user_id") or ""),
-                    "num_views_loggedin": 0,
-                    "num_views_all": 0,
+                    "num_views_loggedin": int(counts.get("num_views_loggedin") or 0),
+                    "num_views_all": int(counts.get("num_views_all") or 0),
                 }
             )
 
@@ -127,3 +135,31 @@ class VideoMetadataService:
             "post_id": str(metadata.get("post_id") or "").strip(),
             "publisher_user_id": str(metadata.get("publisher_user_id") or "").strip(),
         }
+
+    async def _get_view_counts(self, video_ids: list[str]) -> dict[str, dict[str, int]]:
+        unique_video_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+        if not unique_video_ids:
+            return {}
+
+        cached_counts = await self._kv_feed_repository.get_cached_video_view_counts(unique_video_ids)
+        missing_video_ids = [
+            video_id
+            for video_id in unique_video_ids
+            if video_id not in cached_counts
+        ]
+        if not missing_video_ids or self._offchain_rewards_client is None:
+            return cached_counts
+
+        fresh_counts: dict[str, dict[str, int]] = {}
+        try:
+            fresh_counts = await self._offchain_rewards_client.get_bulk_video_stats(missing_video_ids)
+        except Exception as exc:
+            self._log.warning(
+                "Offchain rewards view-count lookup failed",
+                extra={"error": str(exc), "video_count": len(missing_video_ids)},
+            )
+            return cached_counts
+
+        if fresh_counts:
+            await self._kv_feed_repository.cache_video_view_counts(fresh_counts)
+        return {**cached_counts, **fresh_counts}

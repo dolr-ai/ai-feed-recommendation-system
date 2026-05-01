@@ -11,8 +11,10 @@ from src.utils.feed_recsys_keys import (
     user_following_sync_key,
     user_pool_key,
     user_popularity_pointer_key,
-    user_watched_key,
+    user_refill_lock_key,
+    user_served_recent_key,
     video_metadata_key,
+    video_view_count_key,
 )
 
 
@@ -34,18 +36,26 @@ def test_feed_recsys_key_builders_use_storage_namespace():
         "staging:feed_recsys:{user:user-1}:pool:popular"
     )
     assert user_bloom_key(settings, "user-1") == "staging:feed_recsys:{user:user-1}:bloom"
-    assert user_watched_key(settings, "user-1") == "staging:feed_recsys:{user:user-1}:watched"
+    assert user_served_recent_key(settings, "user-1") == (
+        "staging:feed_recsys:{user:user-1}:served_recent"
+    )
     assert user_following_sync_key(settings, "user-1") == (
         "staging:feed_recsys:{user:user-1}:following:last_sync"
     )
     assert user_popularity_pointer_key(settings, "user-1") == (
         "staging:feed_recsys:{user:user-1}:pop_percentile_pointer"
     )
+    assert user_refill_lock_key(settings, "user-1", "ugc") == (
+        "staging:feed_recsys:{user:user-1}:refill:lock:ugc"
+    )
     assert global_pool_key(settings, "popular:l7d") == (
         "staging:feed_recsys:{GLOBAL}:pool:popular:l7d"
     )
     assert excluded_videos_key(settings) == "staging:feed_recsys:{GLOBAL}:exclude:videos"
     assert ai_influencer_ids_key(settings) == "staging:feed_recsys:{GLOBAL}:lookup:ai_influencer_ids"
+    assert video_view_count_key(settings, "video-1") == (
+        "staging:feed_recsys:{GLOBAL}:view_counts:video-1"
+    )
     assert ugc_discovery_timestamps_key(settings) == (
         "staging:feed_recsys:{GLOBAL}:ugc_discovery:timestamps"
     )

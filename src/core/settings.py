@@ -58,11 +58,14 @@ class Settings(BaseSettings):
     feed_recsys_exclude_sync_interval_sec: int = 1800
     feed_recsys_ai_influencer_sync_interval_sec: int = 21600
 
-    feed_recsys_default_count: int = 100
+    feed_recsys_default_count: int = 20
     feed_recsys_max_count: int = 500
     feed_recsys_user_pool_capacity: int = 500
     feed_recsys_refill_threshold: int = 200
     feed_recsys_refill_max_attempts: int = 3
+    feed_recsys_background_refill_threshold: int = 40
+    feed_recsys_background_refill_target: int = 120
+    feed_recsys_refill_lock_ttl_sec: int = 30
     feed_recsys_following_sync_cooldown_sec: int = 600
     feed_recsys_following_refill_threshold: int = 10
     feed_recsys_following_fetch_limit: int = 1000
@@ -97,16 +100,21 @@ class Settings(BaseSettings):
     feed_recsys_ugc_discovery_max_age_days: int = 7
 
     feed_recsys_pool_ttl_sec: int = 3 * 24 * 60 * 60
-    feed_recsys_watched_ttl_sec: int = 24 * 60 * 60
+    feed_recsys_served_recent_ttl_sec: int = 24 * 60 * 60
     feed_recsys_bloom_ttl_sec: int = 30 * 24 * 60 * 60
     feed_recsys_bloom_error_rate: float = 0.01
     feed_recsys_bloom_initial_capacity: int = 1_000_000
     feed_recsys_bloom_expansion: int = 4
     feed_recsys_percentile_pointer_ttl_sec: int = 24 * 60 * 60
     feed_recsys_ugc_discovery_pool_ttl_sec: int = 2 * 60 * 60
+    feed_recsys_view_count_ttl_sec: int = 12 * 60 * 60
+    feed_recsys_view_count_prewarm_enabled: bool = True
+    feed_recsys_view_count_prewarm_batch_size: int = 500
 
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
+    offchain_agent_base_url: str = "https://offchain.yral.com"
+    offchain_agent_timeout: int = 15
 
     ic_gateway_base_url: str = Field(...)
     profile_canister_id: str = Field(...)

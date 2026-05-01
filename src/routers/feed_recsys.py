@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1", tags=["feed-recsys"])
 )
 async def get_recommend_with_metadata(
     user_id: str,
-    count: int = Query(default=100, ge=1, le=500),
+    count: int = Query(default=20, ge=1, le=500),
     rec_type: FeedRecType = Query(default="mixed"),
     recommend_with_metadata_service: RecommendWithMetadataService = Depends(
         get_recommend_with_metadata_service

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Iterable, Optional
 
@@ -13,7 +14,9 @@ from src.utils.feed_recsys_keys import (
     user_following_sync_key,
     user_pool_key,
     user_popularity_pointer_key,
-    user_watched_key,
+    user_refill_lock_key,
+    user_served_recent_key,
+    video_view_count_key,
 )
 
 
@@ -197,7 +200,7 @@ class KVFeedRepository:
             for video_id, result in zip(video_ids, results)
         }
 
-    async def add_watched_videos(
+    async def add_served_recent_videos(
         self,
         user_id: str,
         video_ids: list[str],
@@ -206,22 +209,22 @@ class KVFeedRepository:
         if not video_ids:
             return 0
 
-        ttl = ttl_sec or self._settings.feed_recsys_watched_ttl_sec
+        ttl = ttl_sec or self._settings.feed_recsys_served_recent_ttl_sec
         expiry = self._expiry_timestamp(ttl)
         mapping = {
             video_id: float(expiry)
             for video_id in dict.fromkeys(video_ids)
         }
-        key = user_watched_key(self._settings, user_id)
+        key = user_served_recent_key(self._settings, user_id)
         added = await self._client.zadd(key, mapping)
         await self._client.expire(key, ttl)
         return int(added)
 
-    async def check_user_watched(self, user_id: str, video_ids: list[str]) -> dict[str, bool]:
+    async def check_user_served_recent(self, user_id: str, video_ids: list[str]) -> dict[str, bool]:
         if not video_ids:
             return {}
 
-        key = user_watched_key(self._settings, user_id)
+        key = user_served_recent_key(self._settings, user_id)
         now = self._now()
         await self._client.zremrangebyscore(key, "-inf", now)
 
@@ -234,9 +237,20 @@ class KVFeedRepository:
             for video_id, score in zip(video_ids, scores)
         }
 
-    async def get_watched_count(self, user_id: str) -> int:
-        key = user_watched_key(self._settings, user_id)
+    async def get_served_recent_count(self, user_id: str) -> int:
+        key = user_served_recent_key(self._settings, user_id)
         now = self._now()
+        await self._client.zremrangebyscore(key, "-inf", now)
+        return int(await self._client.zcount(key, now, "+inf"))
+
+    async def get_user_pool_size(
+        self,
+        user_id: str,
+        pool_name: str,
+        current_time: Optional[int] = None,
+    ) -> int:
+        key = user_pool_key(self._settings, user_id, pool_name)
+        now = current_time if current_time is not None else self._now()
         await self._client.zremrangebyscore(key, "-inf", now)
         return int(await self._client.zcount(key, now, "+inf"))
 
@@ -290,6 +304,81 @@ class KVFeedRepository:
             else self._settings.feed_recsys_percentile_pointer_ttl_sec
         )
         return bool(await self._client.set(key, bucket, ex=expiry))
+
+    async def acquire_refill_lock(
+        self,
+        user_id: str,
+        pool_name: str,
+        ttl_sec: Optional[int] = None,
+    ) -> bool:
+        ttl = ttl_sec or self._settings.feed_recsys_refill_lock_ttl_sec
+        return bool(
+            await self._client.set(
+                user_refill_lock_key(self._settings, user_id, pool_name),
+                "1",
+                ex=ttl,
+                nx=True,
+            )
+        )
+
+    async def release_refill_lock(self, user_id: str, pool_name: str) -> None:
+        await self._client.delete(user_refill_lock_key(self._settings, user_id, pool_name))
+
+    async def get_cached_video_view_counts(self, video_ids: list[str]) -> dict[str, dict[str, int]]:
+        unique_video_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+        if not unique_video_ids:
+            return {}
+
+        keys = [video_view_count_key(self._settings, video_id) for video_id in unique_video_ids]
+        if hasattr(self._client, "mget"):
+            values = await self._client.mget(keys)
+        else:
+            pipe = self._client.pipeline()
+            for key in keys:
+                pipe.get(key)
+            values = await pipe.execute()
+
+        result: dict[str, dict[str, int]] = {}
+        for video_id, raw in zip(unique_video_ids, values):
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            result[video_id] = {
+                "num_views_loggedin": int(payload.get("num_views_loggedin") or 0),
+                "num_views_all": int(payload.get("num_views_all") or 0),
+            }
+        return result
+
+    async def cache_video_view_counts(
+        self,
+        view_counts: dict[str, dict[str, int]],
+        ttl_sec: Optional[int] = None,
+    ) -> int:
+        if not view_counts:
+            return 0
+
+        ttl = ttl_sec or self._settings.feed_recsys_view_count_ttl_sec
+        pipe = self._client.pipeline()
+        count = 0
+        for video_id, payload in view_counts.items():
+            if not video_id:
+                continue
+            pipe.set(
+                video_view_count_key(self._settings, video_id),
+                json.dumps(
+                    {
+                        "num_views_loggedin": int(payload.get("num_views_loggedin") or 0),
+                        "num_views_all": int(payload.get("num_views_all") or 0),
+                    }
+                ),
+                ex=ttl,
+            )
+            count += 1
+        await pipe.execute()
+        return count
 
     async def get_ugc_discovery_push_counts(self) -> dict[str, int]:
         raw = await self._client.hgetall(ugc_discovery_pushes_key(self._settings))

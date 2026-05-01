@@ -7,7 +7,7 @@ FeedRecType = Literal["mixed", "popularity", "freshness", "following", "ugc", "f
 
 
 class FeedRecommendationQueryParams(BaseModel):
-    count: int = Field(default=100, ge=1, le=500)
+    count: int = Field(default=20, ge=1, le=500)
     rec_type: FeedRecType = "mixed"
 
 

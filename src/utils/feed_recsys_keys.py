@@ -24,8 +24,8 @@ def user_bloom_key(settings: Settings, user_id: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:bloom"
 
 
-def user_watched_key(settings: Settings, user_id: str) -> str:
-    return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:watched"
+def user_served_recent_key(settings: Settings, user_id: str) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:served_recent"
 
 
 def user_following_sync_key(settings: Settings, user_id: str) -> str:
@@ -34,6 +34,10 @@ def user_following_sync_key(settings: Settings, user_id: str) -> str:
 
 def user_popularity_pointer_key(settings: Settings, user_id: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:pop_percentile_pointer"
+
+
+def user_refill_lock_key(settings: Settings, user_id: str, pool_name: str) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:refill:lock:{pool_name}"
 
 
 def global_pool_key(settings: Settings, pool_name: str) -> str:
@@ -58,6 +62,10 @@ def ugc_discovery_pushes_key(settings: Settings) -> str:
 
 def job_lock_key(settings: Settings, job_name: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_global_slot()}:jobs:lock:{job_name}"
+
+
+def video_view_count_key(settings: Settings, video_id: str) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_global_slot()}:view_counts:{video_id}"
 
 
 def video_metadata_key(video_id: str) -> str:

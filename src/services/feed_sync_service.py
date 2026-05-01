@@ -14,12 +14,14 @@ class FeedSyncService:
         clickhouse_video_metadata_repository,
         kv_feed_repository,
         chat_api_client,
+        offchain_rewards_client,
         settings,
     ):
         self._clickhouse_feed_repository = clickhouse_feed_repository
         self._clickhouse_video_metadata_repository = clickhouse_video_metadata_repository
         self._kv_feed_repository = kv_feed_repository
         self._chat_api_client = chat_api_client
+        self._offchain_rewards_client = offchain_rewards_client
         self._settings = settings
         self._log = LoggerService().get("feed_recsys_sync")
 
@@ -27,6 +29,7 @@ class FeedSyncService:
         rows = await self._clickhouse_feed_repository.get_global_popular_videos()
         grouped = self._bucket_popular_video_ids(rows)
         inserted: dict[str, int] = {}
+        prewarm_video_ids: list[str] = []
         for bucket, video_ids in grouped.items():
             filtered_ids = await self._filter_video_ids_with_metadata(video_ids)
             inserted[bucket] = await self._kv_feed_repository.replace_global_pool(
@@ -34,6 +37,11 @@ class FeedSyncService:
                 filtered_ids,
                 ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
             )
+            prewarm_video_ids.extend(filtered_ids)
+        await self._prewarm_video_view_count_cache(
+            prewarm_video_ids,
+            source="popularity",
+        )
         self._log.info(
             "Feed recsys popularity sync completed",
             extra={"bucket_count": len(inserted), "video_count": sum(inserted.values())},
@@ -51,6 +59,7 @@ class FeedSyncService:
             grouped[bucket].append(video_id)
 
         inserted: dict[str, int] = {}
+        prewarm_video_ids: list[str] = []
         for window in self._settings.feed_recsys_freshness_windows:
             filtered_ids = await self._filter_video_ids_with_metadata(grouped.get(window, []))
             inserted[window] = await self._kv_feed_repository.replace_global_pool(
@@ -58,6 +67,11 @@ class FeedSyncService:
                 filtered_ids,
                 ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
             )
+            prewarm_video_ids.extend(filtered_ids)
+        await self._prewarm_video_view_count_cache(
+            prewarm_video_ids,
+            source="freshness",
+        )
         self._log.info(
             "Feed recsys freshness sync completed",
             extra={"window_count": len(inserted), "video_count": sum(inserted.values())},
@@ -157,6 +171,10 @@ class FeedSyncService:
             discovery_rows,
             ttl_sec=self._settings.feed_recsys_ugc_discovery_pool_ttl_sec,
         )
+        await self._prewarm_video_view_count_cache(
+            filtered_ids,
+            source="ugc_discovery",
+        )
         self._log.info(
             "Feed recsys ugc discovery sync completed",
             extra={"video_count": inserted},
@@ -202,6 +220,73 @@ class FeedSyncService:
                 ]
             )
         return result
+
+    async def _prewarm_video_view_count_cache(
+        self,
+        video_ids: Iterable[str],
+        source: str,
+    ) -> None:
+        if not self._settings.feed_recsys_view_count_prewarm_enabled:
+            return
+        if self._offchain_rewards_client is None:
+            return
+
+        unique_video_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+        if not unique_video_ids:
+            return
+
+        try:
+            cached_counts = await self._kv_feed_repository.get_cached_video_view_counts(
+                unique_video_ids
+            )
+            missing_video_ids = [
+                video_id
+                for video_id in unique_video_ids
+                if video_id not in cached_counts
+            ]
+            if not missing_video_ids:
+                self._log.info(
+                    "Feed recsys view-count prewarm skipped because cache is warm",
+                    extra={
+                        "source": source,
+                        "video_count": len(unique_video_ids),
+                        "cache_hit_count": len(cached_counts),
+                    },
+                )
+                return
+
+            batch_size = max(1, self._settings.feed_recsys_view_count_prewarm_batch_size)
+            written_count = 0
+            fetched_count = 0
+            for index in range(0, len(missing_video_ids), batch_size):
+                batch = missing_video_ids[index:index + batch_size]
+                fresh_counts = await self._offchain_rewards_client.get_bulk_video_stats(batch)
+                fetched_count += len(fresh_counts)
+                if fresh_counts:
+                    written_count += await self._kv_feed_repository.cache_video_view_counts(
+                        fresh_counts
+                    )
+
+            self._log.info(
+                "Feed recsys view-count prewarm completed",
+                extra={
+                    "source": source,
+                    "video_count": len(unique_video_ids),
+                    "cache_hit_count": len(cached_counts),
+                    "cache_miss_count": len(missing_video_ids),
+                    "fetched_count": fetched_count,
+                    "written_count": written_count,
+                },
+            )
+        except Exception as exc:
+            self._log.warning(
+                "Feed recsys view-count prewarm failed",
+                extra={
+                    "source": source,
+                    "video_count": len(unique_video_ids),
+                    "error": str(exc),
+                },
+            )
 
     @staticmethod
     def _has_required_metadata(metadata: Optional[dict]) -> bool:
