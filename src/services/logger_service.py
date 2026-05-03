@@ -14,6 +14,8 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
         for key, value in record.__dict__.items():
             if key.startswith("_") or key in {
                 "name",
@@ -63,6 +65,10 @@ class LoggerService:
         logging.root.addHandler(handler)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("apscheduler").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.ERROR)
+        logging.getLogger("clickhouse_connect").setLevel(logging.ERROR)
+        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
         self._configured = True
 
     def get(self, name: str) -> logging.Logger:

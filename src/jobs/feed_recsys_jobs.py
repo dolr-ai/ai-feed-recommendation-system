@@ -79,15 +79,15 @@ async def _run_locked_job(
 
     acquired = await kvrocks_client.set(lock_key, "1", ex=ttl, nx=True)
     if not acquired:
-        log.info("Feed recsys job already running, skipping", extra={"job": job_name})
+        log.debug("Feed recsys job already running, skipping", extra={"job": job_name})
         return
 
     runtime = build_runtime_objects(kvrocks_client, settings)
     try:
         service_method = getattr(runtime["feed_sync_service"], service_method_name)
         await service_method()
-    except Exception as exc:
-        log.error("Feed recsys job failed", extra={"job": job_name, "error": str(exc)})
+    except Exception:
+        log.exception("Feed recsys job failed", extra={"job": job_name})
         raise
     finally:
         await close_runtime_objects(runtime)

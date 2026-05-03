@@ -11,14 +11,14 @@ async def run_discovery_boost_refresh(kvrocks_client) -> None:
 
     acquired = await acquire_job_lock(kvrocks_client, job_name, ttl=300)
     if not acquired:
-        log.info("Discovery refresh job already running, skipping", extra={"job": job_name})
+        log.debug("Discovery refresh job already running, skipping", extra={"job": job_name})
         return
 
     runtime = build_runtime_objects(kvrocks_client, settings)
     try:
         await runtime["discovery_boost_service"].refresh()
-    except Exception as exc:
-        log.error("Discovery refresh failed", extra={"error": str(exc)})
+    except Exception:
+        log.exception("Discovery refresh failed")
     finally:
         await close_runtime_objects(runtime)
         await release_job_lock(kvrocks_client, job_name)

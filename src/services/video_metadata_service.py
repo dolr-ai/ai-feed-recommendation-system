@@ -87,10 +87,11 @@ class VideoMetadataService:
             fallback_metadata = await self._kv_video_metadata_repository.get_video_metadata_batch(
                 fallback_video_ids
             )
-        except Exception as exc:
+        except Exception:
             self._log.warning(
                 "Central video metadata fallback lookup failed",
-                extra={"error": str(exc), "video_count": len(fallback_video_ids)},
+                extra={"video_count": len(fallback_video_ids)},
+                exc_info=True,
             )
 
         return {
@@ -153,10 +154,11 @@ class VideoMetadataService:
         fresh_counts: dict[str, dict[str, int]] = {}
         try:
             fresh_counts = await self._offchain_rewards_client.get_bulk_video_stats(missing_video_ids)
-        except Exception as exc:
+        except Exception:
             self._log.warning(
                 "Offchain rewards view-count lookup failed",
-                extra={"error": str(exc), "video_count": len(missing_video_ids)},
+                extra={"video_count": len(missing_video_ids)},
+                exc_info=True,
             )
             return cached_counts
 

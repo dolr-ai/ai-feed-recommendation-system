@@ -42,7 +42,7 @@ class FeedSyncService:
             prewarm_video_ids,
             source="popularity",
         )
-        self._log.info(
+        self._log.debug(
             "Feed recsys popularity sync completed",
             extra={"bucket_count": len(inserted), "video_count": sum(inserted.values())},
         )
@@ -72,7 +72,7 @@ class FeedSyncService:
             prewarm_video_ids,
             source="freshness",
         )
-        self._log.info(
+        self._log.debug(
             "Feed recsys freshness sync completed",
             extra={"window_count": len(inserted), "video_count": sum(inserted.values())},
         )
@@ -98,7 +98,7 @@ class FeedSyncService:
             )
             synced_users += 1
 
-        self._log.info(
+        self._log.debug(
             "Feed recsys bloom sync completed",
             extra={"user_count": synced_users, "video_count": synced_videos},
         )
@@ -125,7 +125,7 @@ class FeedSyncService:
             user_id,
             ttl_sec=self._settings.feed_recsys_following_sync_cooldown_sec * 2,
         )
-        self._log.info(
+        self._log.debug(
             "Feed recsys following sync completed",
             extra={"user_id": user_id, "video_count": added},
         )
@@ -143,7 +143,7 @@ class FeedSyncService:
             filtered_ids,
             ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
         )
-        self._log.info(
+        self._log.debug(
             "Feed recsys ugc sync completed",
             extra={"video_count": inserted},
         )
@@ -175,7 +175,7 @@ class FeedSyncService:
             filtered_ids,
             source="ugc_discovery",
         )
-        self._log.info(
+        self._log.debug(
             "Feed recsys ugc discovery sync completed",
             extra={"video_count": inserted},
         )
@@ -184,7 +184,7 @@ class FeedSyncService:
     async def sync_excluded_videos(self) -> dict[str, int]:
         video_ids = await self._clickhouse_feed_repository.get_excluded_video_ids()
         inserted = await self._kv_feed_repository.replace_excluded_videos(video_ids)
-        self._log.info(
+        self._log.debug(
             "Feed recsys exclude sync completed",
             extra={"video_count": inserted},
         )
@@ -194,7 +194,7 @@ class FeedSyncService:
         influencers = await self._chat_api_client.get_all_influencers()
         user_ids = self._extract_ai_influencer_ids(influencers)
         inserted = await self._kv_feed_repository.replace_ai_influencer_ids(user_ids)
-        self._log.info(
+        self._log.debug(
             "Feed recsys AI influencer sync completed",
             extra={"influencer_count": inserted},
         )
@@ -245,7 +245,7 @@ class FeedSyncService:
                 if video_id not in cached_counts
             ]
             if not missing_video_ids:
-                self._log.info(
+                self._log.debug(
                     "Feed recsys view-count prewarm skipped because cache is warm",
                     extra={
                         "source": source,
@@ -267,7 +267,7 @@ class FeedSyncService:
                         fresh_counts
                     )
 
-            self._log.info(
+            self._log.debug(
                 "Feed recsys view-count prewarm completed",
                 extra={
                     "source": source,
@@ -278,14 +278,14 @@ class FeedSyncService:
                     "written_count": written_count,
                 },
             )
-        except Exception as exc:
+        except Exception:
             self._log.warning(
                 "Feed recsys view-count prewarm failed",
                 extra={
                     "source": source,
                     "video_count": len(unique_video_ids),
-                    "error": str(exc),
                 },
+                exc_info=True,
             )
 
     @staticmethod

@@ -108,7 +108,8 @@ class FeedPoolService:
             )
             if not candidates:
                 attempts += 1
-                await self._refill_pool(user_id, pool_name, max(count * 2, self._settings.feed_recsys_refill_threshold))
+                refill_target = max(count * 2, self._settings.feed_recsys_refill_threshold)
+                await self._refill_pool(user_id, pool_name, refill_target)
                 continue
 
             filtered = await self._filter_unseen_videos(user_id, candidates)
@@ -138,8 +139,30 @@ class FeedPoolService:
 
             if len(selected) < count:
                 attempts += 1
-                await self._refill_pool(user_id, pool_name, max(count * 2, self._settings.feed_recsys_refill_threshold))
+                refill_target = max(count * 2, self._settings.feed_recsys_refill_threshold)
+                await self._refill_pool(user_id, pool_name, refill_target)
 
+        if not selected:
+            self._log.debug(
+                "Feed recsys pool returned no videos",
+                extra={
+                    "user_id": user_id,
+                    "pool_name": pool_name,
+                    "requested_count": count,
+                    "attempts": attempts,
+                },
+            )
+        elif len(selected) < count:
+            self._log.debug(
+                "Feed recsys pool returned partial batch",
+                extra={
+                    "user_id": user_id,
+                    "pool_name": pool_name,
+                    "requested_count": count,
+                    "selected_count": len(selected),
+                    "attempts": attempts,
+                },
+            )
         return selected[:count]
 
     async def _bootstrap_if_needed(self, user_id: str) -> None:
@@ -153,9 +176,27 @@ class FeedPoolService:
             user_id,
             self._settings.feed_recsys_popularity_buckets[0],
         )
-        await self.refill_popularity(user_id, self._settings.feed_recsys_refill_threshold * 5)
-        await self.refill_freshness(user_id, self._settings.feed_recsys_refill_threshold * 2)
-        await self.refill_ugc(user_id, max(50, self._settings.feed_recsys_refill_threshold // 2))
+        popularity_added = await self.refill_popularity(
+            user_id,
+            self._settings.feed_recsys_refill_threshold * 5,
+        )
+        freshness_added = await self.refill_freshness(
+            user_id,
+            self._settings.feed_recsys_refill_threshold * 2,
+        )
+        ugc_added = await self.refill_ugc(
+            user_id,
+            max(50, self._settings.feed_recsys_refill_threshold // 2),
+        )
+        self._log.debug(
+            "Feed recsys user bootstrap completed",
+            extra={
+                "user_id": user_id,
+                "popularity_added": popularity_added,
+                "freshness_added": freshness_added,
+                "ugc_added": ugc_added,
+            },
+        )
 
     async def _refill_pool(self, user_id: str, pool_name: str, target: int) -> None:
         if pool_name == "popularity":
@@ -340,6 +381,16 @@ class FeedPoolService:
             request_count * 4,
         )
         task = asyncio.create_task(self._run_background_refill(user_id, pool_name, target))
+        self._log.debug(
+            "Feed recsys background refill scheduled",
+            extra={
+                "user_id": user_id,
+                "pool_name": pool_name,
+                "remaining_count": remaining_count,
+                "request_count": request_count,
+                "target": target,
+            },
+        )
         self._background_refill_tasks.add(task)
         task.add_done_callback(self._background_refill_tasks.discard)
 
@@ -358,9 +409,9 @@ class FeedPoolService:
                 return
             await self._refill_pool(user_id, pool_name, target)
         except Exception as exc:
-            self._log.warning(
+            self._log.exception(
                 "Feed recsys background refill failed",
-                extra={"user_id": user_id, "pool_name": pool_name, "error": str(exc)},
+                extra={"user_id": user_id, "pool_name": pool_name},
             )
         finally:
             await self._kv_feed_repository.release_refill_lock(user_id, pool_name)

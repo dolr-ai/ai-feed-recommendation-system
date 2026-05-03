@@ -15,14 +15,14 @@ async def run_influencer_feed_sync(kvrocks_client) -> None:
         ttl=settings.feed_sync_interval_sec,
     )
     if not acquired:
-        log.info("Job already running, skipping", extra={"job": job_name})
+        log.debug("Job already running, skipping", extra={"job": job_name})
         return
 
     runtime = build_runtime_objects(kvrocks_client, settings)
     try:
         await runtime["pipeline_service"].run()
-    except Exception as exc:
-        log.error("Pipeline failed", extra={"error": str(exc)})
+    except Exception:
+        log.exception("Pipeline failed")
     finally:
         await close_runtime_objects(runtime)
         await release_job_lock(kvrocks_client, job_name)

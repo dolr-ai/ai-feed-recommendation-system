@@ -17,18 +17,20 @@ video_metadata_kvrocks_ssl_ca_cert = ""
 video_metadata_kvrocks_ssl_client_cert = ""
 video_metadata_kvrocks_ssl_client_key = ""
 
+## Local development default: open an SSH tunnel to ansuman-1 HAProxy 8443.
+## Production Compose overrides these values.
 clickhouse_host = "127.0.0.1"
-clickhouse_port = 9000
+clickhouse_port = 18443
 clickhouse_database = "yral"
 clickhouse_username = "default"
 clickhouse_password = ""
-clickhouse_secure = false
-clickhouse_verify = true
+clickhouse_secure = true
+clickhouse_verify = false
 clickhouse_connect_timeout_sec = 10.0
 clickhouse_query_timeout_sec = 30.0
 
-feed_recsys_jobs_enabled = false
-feed_recsys_job_run_on_startup = false
+feed_recsys_jobs_enabled = true
+feed_recsys_job_run_on_startup = true
 feed_recsys_popularity_sync_interval_sec = 21600
 feed_recsys_freshness_sync_interval_sec = 21600
 feed_recsys_bloom_sync_interval_sec = 21600

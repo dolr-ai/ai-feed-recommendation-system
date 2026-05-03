@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from src.config import load_env_overrides, load_file_config
+from src.config import load_env_alias_overrides, load_env_overrides, load_file_config
 
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -279,5 +279,16 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     file_values = load_file_config()
     env_values = load_env_overrides(Settings.model_fields.keys())
-    merged = {**file_values, **env_values}
+    alias_values = load_env_alias_overrides(
+        {
+            "CLICKHOUSE_READER_USERNAME": "clickhouse_username",
+            "CLICKHOUSE_READER_PASSWORD": "clickhouse_password",
+        }
+    )
+    if "clickhouse_username" in env_values:
+        alias_values.pop("clickhouse_username", None)
+    if "clickhouse_password" in env_values:
+        alias_values.pop("clickhouse_password", None)
+
+    merged = {**file_values, **alias_values, **env_values}
     return Settings(**merged)

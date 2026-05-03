@@ -37,6 +37,19 @@ async def lifespan(app: FastAPI):
     logger_service.configure(settings.log_level)
     init_sentry(settings)
     log = logger_service.get("app")
+    log.info(
+        "Feed recsys app starting",
+        extra={
+            "storage_namespace": settings.storage_namespace,
+            "kvrocks_host": settings.kvrocks_host,
+            "kvrocks_port": settings.kvrocks_port,
+            "clickhouse_host": settings.clickhouse_host,
+            "clickhouse_port": settings.clickhouse_port,
+            "scheduler_enabled": settings.scheduler_enabled,
+            "feed_recsys_jobs_enabled": settings.feed_recsys_jobs_enabled,
+            "feed_recsys_job_run_on_startup": settings.feed_recsys_job_run_on_startup,
+        },
+    )
     if emit_sentry_startup_test_event(settings):
         log.info("Sentry startup test message emitted")
     kvrocks = await build_kvrocks_client(settings)
@@ -68,21 +81,13 @@ async def lifespan(app: FastAPI):
             ),
         )
         scheduler.start()
-        if settings.feed_sync_run_on_startup:
-            log.info("Full sync startup run enabled")
-        else:
-            log.info("Full sync startup run disabled")
-
-        if settings.discovery_refresh_run_on_startup:
-            log.info("Discovery refresh startup run enabled")
-        else:
-            log.info("Discovery refresh startup run disabled")
-
-        if (
-            not settings.feed_sync_run_on_startup
-            and not settings.discovery_refresh_run_on_startup
-        ):
-            log.info("Jobs scheduled for future intervals only")
+        log.debug(
+            "Background job startup flags resolved",
+            extra={
+                "feed_sync_run_on_startup": settings.feed_sync_run_on_startup,
+                "discovery_refresh_run_on_startup": settings.discovery_refresh_run_on_startup,
+            },
+        )
     else:
         log.info("Scheduler disabled; no background jobs scheduled")
 
@@ -153,6 +158,15 @@ async def lifespan(app: FastAPI):
         log.info(
             "Feed recsys jobs scheduled",
             extra={"run_on_startup": settings.feed_recsys_job_run_on_startup},
+        )
+    else:
+        log.info(
+            "Feed recsys jobs not scheduled",
+            extra={
+                "scheduler_enabled": settings.scheduler_enabled,
+                "feed_recsys_jobs_enabled": settings.feed_recsys_jobs_enabled,
+                "feed_recsys_job_run_on_startup": settings.feed_recsys_job_run_on_startup,
+            },
         )
 
     app.state.kvrocks = kvrocks

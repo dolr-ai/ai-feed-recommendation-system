@@ -48,9 +48,9 @@ class ClickHouseClient:
         parameters: Optional[dict[str, Any]] = None,
     ) -> Any:
         return await asyncio.to_thread(
-            self._get_or_create_client().execute,
+            self._get_or_create_client().command,
             query,
-            parameters or {},
+            parameters=parameters or {},
         )
 
     async def ping(self) -> bool:
@@ -61,7 +61,8 @@ class ClickHouseClient:
             return
         client = self._client
         self._client = None
-        await asyncio.to_thread(client.disconnect_connection)
+        if hasattr(client, "close"):
+            await asyncio.to_thread(client.close)
 
     async def aclose(self) -> None:
         await self.close()
@@ -71,12 +72,18 @@ class ClickHouseClient:
         query: str,
         parameters: dict[str, Any],
     ) -> tuple[list[tuple[Any, ...]], list[str]]:
-        rows, column_meta = self._get_or_create_client().execute(
+        query_result = self._get_or_create_client().query(
             query,
-            parameters,
-            with_column_types=True,
+            parameters=parameters,
         )
-        column_names = [name for name, _ in column_meta]
+        rows = list(
+            getattr(
+                query_result,
+                "result_rows",
+                getattr(query_result, "result_set", []),
+            )
+        )
+        column_names = list(getattr(query_result, "column_names", []))
         return rows, column_names
 
     def _get_or_create_client(self) -> Any:
@@ -84,17 +91,17 @@ class ClickHouseClient:
             return self._client
 
         try:
-            from clickhouse_driver import Client as SyncClickHouseClient
+            from clickhouse_connect import get_client
         except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional install state
             raise RuntimeError(
-                "clickhouse-driver is required for ClickHouse access."
+                "clickhouse-connect is required for ClickHouse access."
             ) from exc
 
-        self._client = SyncClickHouseClient(
+        self._client = get_client(
             host=self._settings.clickhouse_host,
             port=self._settings.clickhouse_port,
             database=self._settings.clickhouse_database,
-            user=self._settings.clickhouse_username,
+            username=self._settings.clickhouse_username,
             password=self._settings.clickhouse_password or "",
             secure=self._settings.clickhouse_secure,
             verify=self._settings.clickhouse_verify,
