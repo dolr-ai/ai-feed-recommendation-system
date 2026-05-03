@@ -1,3 +1,5 @@
+import sentry_sdk
+
 from src.core.dependencies import build_runtime_objects, close_runtime_objects
 from src.core.settings import get_settings
 from src.services.logger_service import LoggerService
@@ -86,7 +88,8 @@ async def _run_locked_job(
     try:
         service_method = getattr(runtime["feed_sync_service"], service_method_name)
         await service_method()
-    except Exception:
+    except Exception as exc:
+        sentry_sdk.capture_exception(exc)
         log.exception("Feed recsys job failed", extra={"job": job_name})
         raise
     finally:

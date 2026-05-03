@@ -1,6 +1,6 @@
 import sentry_sdk
 
-from src.core.dependencies import build_runtime_objects
+from src.core.dependencies import build_runtime_objects, close_runtime_objects
 from src.core.settings import get_settings
 from src.services.logger_service import LoggerService
 from src.utils.job_lock import acquire_job_lock, release_job_lock

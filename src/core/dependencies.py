@@ -22,7 +22,6 @@ from src.services.pipeline_service import PipelineService
 from src.services.recommend_with_metadata_service import RecommendWithMetadataService
 from src.services.scoring_service import ScoringService
 from src.services.video_metadata_service import VideoMetadataService
-from src.utils.kvrocks import build_video_metadata_kvrocks_client
 
 
 def build_runtime_objects(kvrocks_client, settings=None) -> dict:
@@ -37,9 +36,8 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         resolved_settings,
     )
     kv_feed_repository = KVFeedRepository(kvrocks_client, resolved_settings)
-    video_metadata_kvrocks_client = build_video_metadata_kvrocks_client(resolved_settings)
     kv_video_metadata_repository = KVVideoMetadataRepository(
-        video_metadata_kvrocks_client,
+        kvrocks_client,
         resolved_settings,
     )
     repo = InfluencerRepository(kvrocks_client, resolved_settings)
@@ -95,7 +93,6 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         "clickhouse_feed_repository": clickhouse_feed_repository,
         "clickhouse_video_metadata_repository": clickhouse_video_metadata_repository,
         "kv_feed_repository": kv_feed_repository,
-        "video_metadata_kvrocks_client": video_metadata_kvrocks_client,
         "kv_video_metadata_repository": kv_video_metadata_repository,
         "repo": repo,
         "checkpoint_repo": checkpoint_repo,
@@ -122,15 +119,6 @@ async def close_runtime_objects(runtime: dict) -> None:
     await runtime["chat_api_client"].close()
     await runtime["offchain_rewards_client"].close()
     await runtime["clickhouse_client"].close()
-
-    video_metadata_kvrocks_client = runtime.get("video_metadata_kvrocks_client")
-    if video_metadata_kvrocks_client is None:
-        return
-
-    if hasattr(video_metadata_kvrocks_client, "aclose"):
-        await video_metadata_kvrocks_client.aclose()
-    elif hasattr(video_metadata_kvrocks_client, "close"):
-        await video_metadata_kvrocks_client.close()
 
 
 def get_kvrocks(request: Request):

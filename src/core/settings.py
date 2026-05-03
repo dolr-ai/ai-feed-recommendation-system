@@ -29,14 +29,6 @@ class Settings(BaseSettings):
     kvrocks_ssl_ca_cert: str = ""
     kvrocks_ssl_client_cert: str = ""
     kvrocks_ssl_client_key: str = ""
-    video_metadata_kvrocks_hosts: list[str] = Field(default_factory=list)
-    video_metadata_kvrocks_port: int = 6666
-    video_metadata_kvrocks_password: str = ""
-    video_metadata_kvrocks_tls_enabled: bool = True
-    video_metadata_kvrocks_cluster_enabled: bool = True
-    video_metadata_kvrocks_ssl_ca_cert: str = ""
-    video_metadata_kvrocks_ssl_client_cert: str = ""
-    video_metadata_kvrocks_ssl_client_key: str = ""
 
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 9000
@@ -204,7 +196,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "curated_top_influencer_ids",
-        "video_metadata_kvrocks_hosts",
         mode="before",
     )
     @classmethod
