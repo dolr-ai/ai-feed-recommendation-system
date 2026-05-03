@@ -9,8 +9,81 @@ kvrocks_password = ""
 kvrocks_tls_enabled = false
 kvrocks_cluster_enabled = false
 
+## Local development default: open an SSH tunnel to ansuman-1 HAProxy 8443.
+## Production Compose overrides these values.
+clickhouse_host = "127.0.0.1"
+clickhouse_port = 18443
+clickhouse_database = "yral"
+clickhouse_username = "default"
+clickhouse_password = ""
+clickhouse_secure = true
+clickhouse_verify = false
+clickhouse_connect_timeout_sec = 10.0
+clickhouse_query_timeout_sec = 30.0
+
+feed_recsys_jobs_enabled = true
+feed_recsys_job_run_on_startup = true
+feed_recsys_popularity_sync_interval_sec = 21600
+feed_recsys_freshness_sync_interval_sec = 21600
+feed_recsys_bloom_sync_interval_sec = 21600
+feed_recsys_ugc_sync_interval_sec = 21600
+feed_recsys_ugc_discovery_sync_interval_sec = 1800
+feed_recsys_exclude_sync_interval_sec = 1800
+feed_recsys_ai_influencer_sync_interval_sec = 21600
+
+feed_recsys_default_count = 20
+feed_recsys_max_count = 500
+feed_recsys_user_pool_capacity = 500
+feed_recsys_refill_threshold = 200
+feed_recsys_refill_max_attempts = 3
+feed_recsys_background_refill_threshold = 40
+feed_recsys_background_refill_target = 120
+feed_recsys_refill_lock_ttl_sec = 30
+feed_recsys_following_sync_cooldown_sec = 600
+feed_recsys_following_refill_threshold = 10
+feed_recsys_following_fetch_limit = 1000
+feed_recsys_following_first_segment_min = 3
+feed_recsys_following_first_segment_max = 5
+feed_recsys_following_first_segment_size = 10
+feed_recsys_following_max_per_request = 30
+feed_recsys_popularity_ratio = 0.60
+feed_recsys_freshness_ratio = 0.40
+feed_recsys_ugc_ratio = 0.30
+feed_recsys_popularity_buckets = [
+  "99_100",
+  "90_99",
+  "80_90",
+  "70_80",
+  "60_70",
+  "50_60",
+  "40_50",
+  "30_40",
+  "20_30",
+  "10_20",
+  "0_10",
+]
+feed_recsys_freshness_windows = ["l1d", "l7d", "l14d", "l30d", "l90d"]
+feed_recsys_ugc_pool_limit = 10000
+feed_recsys_ugc_discovery_pool_limit = 5000
+feed_recsys_ugc_discovery_max_views = 200
+feed_recsys_ugc_discovery_max_age_days = 7
+
+feed_recsys_pool_ttl_sec = 259200
+feed_recsys_served_recent_ttl_sec = 86400
+feed_recsys_bloom_ttl_sec = 2592000
+feed_recsys_bloom_error_rate = 0.01
+feed_recsys_bloom_initial_capacity = 1000000
+feed_recsys_bloom_expansion = 4
+feed_recsys_percentile_pointer_ttl_sec = 86400
+feed_recsys_ugc_discovery_pool_ttl_sec = 7200
+feed_recsys_view_count_ttl_sec = 43200
+feed_recsys_view_count_prewarm_enabled = true
+feed_recsys_view_count_prewarm_batch_size = 500
+
 chat_api_base_url = "https://chat-ai.rishi.yral.com"
 chat_api_timeout = 30
+offchain_agent_base_url = "https://offchain.yral.com"
+offchain_agent_timeout = 15
 
 ic_gateway_base_url = "https://ic0.app"
 profile_canister_id = "ivkka-7qaaa-aaaas-qbg3q-cai"

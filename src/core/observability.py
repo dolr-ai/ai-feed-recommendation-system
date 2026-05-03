@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 
 import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 from src.core.settings import Settings, get_settings
@@ -37,7 +38,12 @@ def init_sentry(settings: Optional[Settings] = None) -> bool:
         traces_sample_rate=settings.sentry_traces_sample_rate,
         profiles_sample_rate=settings.sentry_profiles_sample_rate,
         integrations=[
-            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            FastApiIntegration(),
+            LoggingIntegration(
+                level=logging.INFO,
+                event_level=None,
+                sentry_logs_level=logging.INFO,
+            ),
         ],
     )
     _sentry_initialized = True

@@ -31,6 +31,7 @@ async def test_run_influencer_feed_sync_captures_pipeline_failures(monkeypatch):
     kvrocks_client = object()
     captured: list[Exception] = []
     released: list[tuple[object, str]] = []
+    closed: list[dict] = []
     chat_api_client = _StubChatApiClient()
     runtime = {
         "pipeline_service": _StubPipelineService(),
@@ -42,6 +43,10 @@ async def test_run_influencer_feed_sync_captures_pipeline_failures(monkeypatch):
 
     async def fake_release_job_lock(client, job_name: str) -> None:
         released.append((client, job_name))
+
+    async def fake_close_runtime_objects(runtime_payload) -> None:
+        closed.append(runtime_payload)
+        await runtime_payload["chat_api_client"].close()
 
     monkeypatch.setattr(
         influencer_feed_job,
@@ -64,6 +69,11 @@ async def test_run_influencer_feed_sync_captures_pipeline_failures(monkeypatch):
         fake_release_job_lock,
     )
     monkeypatch.setattr(
+        influencer_feed_job,
+        "close_runtime_objects",
+        fake_close_runtime_objects,
+    )
+    monkeypatch.setattr(
         influencer_feed_job.LoggerService,
         "get",
         lambda self, _name: _StubLogger(),
@@ -77,5 +87,6 @@ async def test_run_influencer_feed_sync_captures_pipeline_failures(monkeypatch):
     await influencer_feed_job.run_influencer_feed_sync(kvrocks_client)
 
     assert [str(exc) for exc in captured] == ["upstream 500"]
+    assert closed == [runtime]
     assert chat_api_client.closed is True
     assert released == [(kvrocks_client, "influencer_feed_sync")]

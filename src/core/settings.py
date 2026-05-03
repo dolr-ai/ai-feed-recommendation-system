@@ -2,9 +2,9 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from src.config import load_env_overrides, load_file_config
+from src.config import load_env_alias_overrides, load_env_overrides, load_file_config
 
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,8 +30,83 @@ class Settings(BaseSettings):
     kvrocks_ssl_client_cert: str = ""
     kvrocks_ssl_client_key: str = ""
 
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 9000
+    clickhouse_database: str = "yral"
+    clickhouse_username: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_secure: bool = False
+    clickhouse_verify: bool = True
+    clickhouse_connect_timeout_sec: float = 10.0
+    clickhouse_query_timeout_sec: float = 30.0
+
+    feed_recsys_jobs_enabled: bool = False
+    feed_recsys_job_run_on_startup: bool = False
+    feed_recsys_popularity_sync_interval_sec: int = 21600
+    feed_recsys_freshness_sync_interval_sec: int = 21600
+    feed_recsys_bloom_sync_interval_sec: int = 21600
+    feed_recsys_ugc_sync_interval_sec: int = 21600
+    feed_recsys_ugc_discovery_sync_interval_sec: int = 1800
+    feed_recsys_exclude_sync_interval_sec: int = 1800
+    feed_recsys_ai_influencer_sync_interval_sec: int = 21600
+
+    feed_recsys_default_count: int = 20
+    feed_recsys_max_count: int = 500
+    feed_recsys_user_pool_capacity: int = 500
+    feed_recsys_refill_threshold: int = 200
+    feed_recsys_refill_max_attempts: int = 3
+    feed_recsys_background_refill_threshold: int = 40
+    feed_recsys_background_refill_target: int = 120
+    feed_recsys_refill_lock_ttl_sec: int = 30
+    feed_recsys_following_sync_cooldown_sec: int = 600
+    feed_recsys_following_refill_threshold: int = 10
+    feed_recsys_following_fetch_limit: int = 1000
+    feed_recsys_following_first_segment_min: int = 3
+    feed_recsys_following_first_segment_max: int = 5
+    feed_recsys_following_first_segment_size: int = 10
+    feed_recsys_following_max_per_request: int = 30
+    feed_recsys_popularity_ratio: float = 0.60
+    feed_recsys_freshness_ratio: float = 0.40
+    feed_recsys_ugc_ratio: float = 0.30
+    feed_recsys_popularity_buckets: list[str] = Field(
+        default_factory=lambda: [
+            "99_100",
+            "90_99",
+            "80_90",
+            "70_80",
+            "60_70",
+            "50_60",
+            "40_50",
+            "30_40",
+            "20_30",
+            "10_20",
+            "0_10",
+        ]
+    )
+    feed_recsys_freshness_windows: list[str] = Field(
+        default_factory=lambda: ["l1d", "l7d", "l14d", "l30d", "l90d"]
+    )
+    feed_recsys_ugc_pool_limit: int = 10000
+    feed_recsys_ugc_discovery_pool_limit: int = 5000
+    feed_recsys_ugc_discovery_max_views: int = 200
+    feed_recsys_ugc_discovery_max_age_days: int = 7
+
+    feed_recsys_pool_ttl_sec: int = 3 * 24 * 60 * 60
+    feed_recsys_served_recent_ttl_sec: int = 24 * 60 * 60
+    feed_recsys_bloom_ttl_sec: int = 30 * 24 * 60 * 60
+    feed_recsys_bloom_error_rate: float = 0.01
+    feed_recsys_bloom_initial_capacity: int = 1_000_000
+    feed_recsys_bloom_expansion: int = 4
+    feed_recsys_percentile_pointer_ttl_sec: int = 24 * 60 * 60
+    feed_recsys_ugc_discovery_pool_ttl_sec: int = 2 * 60 * 60
+    feed_recsys_view_count_ttl_sec: int = 12 * 60 * 60
+    feed_recsys_view_count_prewarm_enabled: bool = True
+    feed_recsys_view_count_prewarm_batch_size: int = 500
+
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
+    offchain_agent_base_url: str = "https://offchain.yral.com"
+    offchain_agent_timeout: int = 15
 
     ic_gateway_base_url: str = Field(...)
     profile_canister_id: str = Field(...)
@@ -119,9 +194,12 @@ class Settings(BaseSettings):
             raise ValueError("mixer_pattern must contain 6 E slots and 4 D slots")
         return ",".join(tokens)
 
-    @field_validator("curated_top_influencer_ids", mode="before")
+    @field_validator(
+        "curated_top_influencer_ids",
+        mode="before",
+    )
     @classmethod
-    def validate_curated_top_influencer_ids(cls, value: Any) -> list[str]:
+    def validate_string_lists(cls, value: Any, info: ValidationInfo) -> list[str]:
         if value is None or value == "":
             return []
 
@@ -142,11 +220,13 @@ class Settings(BaseSettings):
         elif isinstance(value, (list, tuple)):
             raw_items = list(value)
         else:
-            raise ValueError("curated_top_influencer_ids must be a list or comma-separated string")
+            raise ValueError(
+                f"{info.field_name} must be a list or comma-separated string"
+            )
 
         normalized = [str(item).strip() for item in raw_items if str(item).strip()]
         if len(normalized) != len(set(normalized)):
-            raise ValueError("curated_top_influencer_ids must not contain duplicates")
+            raise ValueError(f"{info.field_name} must not contain duplicates")
         return normalized
 
     @model_validator(mode="after")
@@ -190,5 +270,16 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     file_values = load_file_config()
     env_values = load_env_overrides(Settings.model_fields.keys())
-    merged = {**file_values, **env_values}
+    alias_values = load_env_alias_overrides(
+        {
+            "CLICKHOUSE_READER_USERNAME": "clickhouse_username",
+            "CLICKHOUSE_READER_PASSWORD": "clickhouse_password",
+        }
+    )
+    if "clickhouse_username" in env_values:
+        alias_values.pop("clickhouse_username", None)
+    if "clickhouse_password" in env_values:
+        alias_values.pop("clickhouse_password", None)
+
+    merged = {**file_values, **alias_values, **env_values}
     return Settings(**merged)

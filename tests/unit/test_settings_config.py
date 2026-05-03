@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.config import load_env_overrides, load_file_config
-from src.core.settings import Settings
+from src.config import load_env_alias_overrides, load_env_overrides, load_file_config
+from src.core.settings import Settings, get_settings
 
 
 def test_load_file_config_reads_flat_toml(tmp_path: Path):
@@ -39,6 +39,46 @@ def test_env_overrides_beat_file_values(monkeypatch):
     settings = Settings(**merged)
 
     assert settings.kvrocks_port == 9999
+
+
+def test_load_env_alias_overrides_maps_reader_credentials(tmp_path: Path):
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        'CLICKHOUSE_READER_USERNAME="reader-user"\n'
+        'CLICKHOUSE_READER_PASSWORD="reader-pass"\n'
+    )
+
+    overrides = load_env_alias_overrides(
+        {
+            "CLICKHOUSE_READER_USERNAME": "clickhouse_username",
+            "CLICKHOUSE_READER_PASSWORD": "clickhouse_password",
+        },
+        dotenv_path=str(dotenv_path),
+    )
+
+    assert overrides == {
+        "clickhouse_username": "reader-user",
+        "clickhouse_password": "reader-pass",
+    }
+
+
+def test_get_settings_uses_reader_alias_when_direct_clickhouse_env_is_absent(monkeypatch):
+    get_settings.cache_clear()
+    monkeypatch.delenv("CLICKHOUSE_USERNAME", raising=False)
+    monkeypatch.delenv("CLICKHOUSE_PASSWORD", raising=False)
+    monkeypatch.setenv("CLICKHOUSE_READER_USERNAME", "reader-user")
+    monkeypatch.setenv("CLICKHOUSE_READER_PASSWORD", "reader-pass")
+    monkeypatch.setenv("CHAT_API_BASE_URL", "https://example.com")
+    monkeypatch.setenv("IC_GATEWAY_BASE_URL", "https://ic0.app")
+    monkeypatch.setenv("PROFILE_CANISTER_ID", "profile-id")
+    monkeypatch.setenv("POSTS_CANISTER_ID", "posts-id")
+
+    settings = get_settings()
+
+    assert settings.clickhouse_username == "reader-user"
+    assert settings.clickhouse_password == "reader-pass"
+
+    get_settings.cache_clear()
 
 
 def test_required_endpoint_and_canister_values_must_come_from_config_or_env():

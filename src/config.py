@@ -40,6 +40,19 @@ def load_env_overrides(field_names: Iterable[str], dotenv_path: str = ".env") ->
     return overrides
 
 
+def load_env_alias_overrides(
+    env_to_field: dict[str, str],
+    dotenv_path: str = ".env",
+) -> dict[str, Any]:
+    env_source = _load_dotenv_file(dotenv_path)
+    env_source.update(os.environ)
+    overrides: dict[str, Any] = {}
+    for env_key, field_name in env_to_field.items():
+        if env_key in env_source:
+            overrides[field_name] = env_source[env_key]
+    return overrides
+
+
 def _load_dotenv_file(path_str: str) -> dict[str, str]:
     path = Path(path_str)
     if not path.exists():
