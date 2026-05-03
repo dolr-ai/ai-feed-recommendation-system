@@ -36,20 +36,32 @@ class FeedPoolService:
             self._settings.feed_recsys_following_max_per_request,
             count // 3,
         )
-        following_videos = await self._fetch_pool_videos(user_id, "following", following_needed)
+        following_videos = await self._fetch_optional_pool_videos(
+            user_id,
+            "following",
+            following_needed,
+        )
         sources["following"] = len(following_videos)
 
         remaining_slots = max(0, count - len(following_videos))
         ugc_needed = max(1, int(remaining_slots * self._settings.feed_recsys_ugc_ratio))
-        ugc_videos = await self._fetch_pool_videos(user_id, "ugc", ugc_needed)
+        ugc_videos = await self._fetch_optional_pool_videos(user_id, "ugc", ugc_needed)
         sources["ugc"] = len(ugc_videos)
 
         slots_for_pop_fresh = max(0, remaining_slots - len(ugc_videos))
         pop_needed = int(slots_for_pop_fresh * self._settings.feed_recsys_popularity_ratio)
         fresh_needed = max(0, slots_for_pop_fresh - pop_needed)
 
-        popularity_videos = await self._fetch_pool_videos(user_id, "popularity", pop_needed)
-        freshness_videos = await self._fetch_pool_videos(user_id, "freshness", fresh_needed)
+        popularity_videos = await self._fetch_optional_pool_videos(
+            user_id,
+            "popularity",
+            pop_needed,
+        )
+        freshness_videos = await self._fetch_optional_pool_videos(
+            user_id,
+            "freshness",
+            fresh_needed,
+        )
         sources["popularity"] = len(popularity_videos)
         sources["freshness"] = len(freshness_videos)
 
@@ -82,11 +94,35 @@ class FeedPoolService:
 
         remaining_needed = max(0, count - len(all_videos))
         if remaining_needed > 0:
-            fallback_videos = await self._fetch_pool_videos(user_id, "fallback", remaining_needed)
+            fallback_videos = await self._fetch_optional_pool_videos(
+                user_id,
+                "fallback",
+                remaining_needed,
+            )
             all_videos.extend(fallback_videos)
             sources["fallback"] = len(fallback_videos)
 
         return all_videos[:count], sources
+
+    async def _fetch_optional_pool_videos(
+        self,
+        user_id: str,
+        pool_name: str,
+        count: int,
+    ) -> list[str]:
+        try:
+            return await self._fetch_pool_videos(user_id, pool_name, count)
+        except Exception:
+            self._log.warning(
+                "Feed recsys optional source failed",
+                extra={
+                    "user_id": user_id,
+                    "pool_name": pool_name,
+                    "requested_count": count,
+                },
+                exc_info=True,
+            )
+            return []
 
     async def _fetch_pool_videos(self, user_id: str, pool_name: str, count: int) -> list[str]:
         if count <= 0:
@@ -198,21 +234,18 @@ class FeedPoolService:
             },
         )
 
-    async def _refill_pool(self, user_id: str, pool_name: str, target: int) -> None:
+    async def _refill_pool(self, user_id: str, pool_name: str, target: int) -> int:
         if pool_name == "popularity":
-            await self.refill_popularity(user_id, target)
-            return
+            return await self.refill_popularity(user_id, target)
         if pool_name == "freshness":
-            await self.refill_freshness(user_id, target)
-            return
+            return await self.refill_freshness(user_id, target)
         if pool_name == "ugc":
-            await self.refill_ugc(user_id, target)
-            return
+            return await self.refill_ugc(user_id, target)
         if pool_name == "following":
-            await self.refill_following(user_id)
-            return
+            return await self.refill_following(user_id)
         if pool_name == "fallback":
-            await self.refill_fallback(user_id, target)
+            return await self.refill_fallback(user_id, target)
+        return 0
 
     async def refill_popularity(self, user_id: str, target: int) -> int:
         await self._kv_feed_repository.ensure_user_bloom(user_id)
@@ -285,18 +318,19 @@ class FeedPoolService:
             ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
         )
 
-    async def refill_following(self, user_id: str) -> None:
+    async def refill_following(self, user_id: str) -> int:
         now = int(time.time())
         last_sync = await self._kv_feed_repository.get_following_sync_time(user_id)
         if last_sync is not None and (now - last_sync) < self._settings.feed_recsys_following_sync_cooldown_sec:
-            return
+            return 0
 
         await self._kv_feed_repository.set_following_sync_time(
             user_id,
             now,
             ttl_sec=self._settings.feed_recsys_following_sync_cooldown_sec * 2,
         )
-        await self._feed_sync_service.sync_user_following_pool(user_id)
+        result = await self._feed_sync_service.sync_user_following_pool(user_id)
+        return int(result.get("added") or 0)
 
     async def refill_fallback(self, user_id: str, target: int) -> int:
         fallback_sources = [

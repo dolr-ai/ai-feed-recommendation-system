@@ -3,6 +3,10 @@ import asyncio
 from src.services.feed_pool_service import FeedPoolService
 
 
+USER_A = "dc23f-7vyti-xp4vt-gqhlt-3qq2p-qoocg-iweu4-vv4wv-ur56b-jq4ap-nae"
+USER_B = "jjhwf-vqja5-n5ds4-d5pnp-i4zva-xgr3n-qspvp-g4k4e-yfabm-qlm7q-jae"
+
+
 class StubKVFeedRepository:
     def __init__(self):
         self.user_pool_reads = [
@@ -51,12 +55,36 @@ class StubKVFeedRepository:
         return 1
 
 
+class IsolatedKVFeedRepository(StubKVFeedRepository):
+    def __init__(self):
+        super().__init__()
+        self.user_pool_reads = []
+        self.pools = {
+            (USER_A, "popularity"): ["a-video-1", "a-video-2"],
+            (USER_B, "popularity"): ["b-video-1", "b-video-2"],
+        }
+
+    async def get_user_pool(self, user_id, pool_name, limit, current_time=None):
+        return list(self.pools.get((user_id, pool_name), []))[:limit]
+
+    async def remove_user_pool_videos(self, user_id, pool_name, video_ids):
+        current = self.pools.get((user_id, pool_name), [])
+        remove_set = set(video_ids)
+        self.pools[(user_id, pool_name)] = [
+            video_id
+            for video_id in current
+            if video_id not in remove_set
+        ]
+        return await super().remove_user_pool_videos(user_id, pool_name, video_ids)
+
+
 class StubFeedSyncService:
     def __init__(self):
         self.following_sync_calls = []
 
     async def sync_user_following_pool(self, user_id):
         self.following_sync_calls.append(user_id)
+        return {"fetched": 0, "added": 0}
 
 
 class StubSettings:
@@ -111,3 +139,77 @@ async def test_fetch_pool_videos_marks_served_recent_and_schedules_background_re
         ("user-1", ["video-1", "video-2"])
     ]
     assert refill_calls == [("user-1", "popularity", 40)]
+
+
+async def test_refill_pool_returns_refill_counts():
+    service = FeedPoolService(
+        kv_feed_repository=StubKVFeedRepository(),
+        feed_sync_service=StubFeedSyncService(),
+        settings=StubSettings(),
+    )
+
+    async def _fake_refill_popularity(user_id, target):
+        assert user_id == USER_A
+        assert target == 25
+        return 17
+
+    service.refill_popularity = _fake_refill_popularity
+
+    assert await service._refill_pool(USER_A, "popularity", 25) == 17
+
+
+async def test_mixed_feed_degrades_when_following_source_fails():
+    service = FeedPoolService(
+        kv_feed_repository=StubKVFeedRepository(),
+        feed_sync_service=StubFeedSyncService(),
+        settings=StubSettings(),
+    )
+
+    async def _fake_fetch_pool(user_id, pool_name, count):
+        assert user_id == USER_A
+        if pool_name == "following":
+            raise RuntimeError("following unavailable")
+        if pool_name == "ugc":
+            return []
+        if pool_name == "popularity":
+            return ["popular-1"][:count]
+        if pool_name == "freshness":
+            return ["fresh-1", "fresh-2"][:count]
+        return []
+
+    service._fetch_pool_videos = _fake_fetch_pool
+
+    videos, sources = await service._get_mixed_video_ids(USER_A, 3)
+
+    assert set(videos) == {"popular-1", "fresh-1", "fresh-2"}
+    assert sources == {
+        "following": 0,
+        "ugc": 0,
+        "popularity": 1,
+        "freshness": 2,
+    }
+
+
+async def test_user_pool_fetch_keeps_different_users_isolated():
+    kv_feed_repository = IsolatedKVFeedRepository()
+    service = FeedPoolService(
+        kv_feed_repository=kv_feed_repository,
+        feed_sync_service=StubFeedSyncService(),
+        settings=StubSettings(),
+    )
+
+    user_a_videos = await service._fetch_pool_videos(USER_A, "popularity", 1)
+    user_b_videos = await service._fetch_pool_videos(USER_B, "popularity", 1)
+
+    assert user_a_videos == ["a-video-1"]
+    assert user_b_videos == ["b-video-1"]
+    assert kv_feed_repository.pools[(USER_A, "popularity")] == ["a-video-2"]
+    assert kv_feed_repository.pools[(USER_B, "popularity")] == ["b-video-2"]
+    assert kv_feed_repository.removed_batches == [
+        (USER_A, "popularity", ["a-video-1"]),
+        (USER_B, "popularity", ["b-video-1"]),
+    ]
+    assert kv_feed_repository.served_recent_batches == [
+        (USER_A, ["a-video-1"]),
+        (USER_B, ["b-video-1"]),
+    ]
