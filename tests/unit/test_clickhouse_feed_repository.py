@@ -38,20 +38,6 @@ async def test_get_global_popular_videos_uses_validity_and_exclusion_filters():
     assert params == {"limit": 25}
 
 
-async def test_get_ugc_discovery_videos_uses_impression_and_age_parameters():
-    client = StubClickHouseClient(rows=[{"video_id": "v2", "upload_timestamp": "2026-04-29", "impression_count": 10}])
-    repo = ClickHouseFeedRepository(client, build_settings(clickhouse_database="yral"))
-
-    await repo.get_ugc_discovery_videos(max_views=150, max_age_days=5, limit=100)
-
-    query, params = client.calls[0]
-    assert "LEFT JOIN yral.video_statistics AS vs FINAL" in query
-    assert "coalesce(vs.total_impressions, 0) < %(max_views)s" in query
-    assert "us.upload_timestamp >= now() - INTERVAL %(max_age_days)s DAY" in query
-    assert "LIMIT %(limit)s" in query
-    assert params == {"max_views": 150, "max_age_days": 5, "limit": 100}
-
-
 async def test_get_following_video_candidates_uses_follower_graph_and_user_parameter():
     client = StubClickHouseClient(rows=[{"video_id": "v3", "global_popularity_score": None}])
     repo = ClickHouseFeedRepository(client, build_settings(clickhouse_database="yral"))

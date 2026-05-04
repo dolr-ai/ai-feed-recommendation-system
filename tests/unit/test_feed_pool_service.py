@@ -14,6 +14,7 @@ class StubKVFeedRepository:
         ]
         self.removed_batches = []
         self.served_recent_batches = []
+        self.tracked_following_users = []
         self.refill_lock_calls = []
         self.released_lock_calls = []
         self.pool_sizes = [5, 5]
@@ -53,6 +54,19 @@ class StubKVFeedRepository:
 
     async def get_served_recent_count(self, user_id):
         return 1
+
+    async def track_following_sync_user(self, user_id):
+        self.tracked_following_users.append(user_id)
+        return True
+
+    async def ensure_user_bloom(self, user_id):
+        return True
+
+    async def get_global_pool(self, pool_name, limit, current_time=None):
+        return []
+
+    async def add_user_pool_videos(self, user_id, pool_name, video_ids, ttl_sec=None):
+        return len(video_ids)
 
 
 class IsolatedKVFeedRepository(StubKVFeedRepository):
@@ -95,7 +109,6 @@ class StubSettings:
     feed_recsys_following_refill_threshold = 10
     feed_recsys_refill_lock_ttl_sec = 30
     feed_recsys_served_recent_ttl_sec = 86400
-    feed_recsys_following_sync_cooldown_sec = 600
     feed_recsys_popularity_buckets = ["99_100"]
     feed_recsys_freshness_windows = ["l7d"]
     feed_recsys_pool_ttl_sec = 3600
@@ -139,6 +152,77 @@ async def test_fetch_pool_videos_marks_served_recent_and_schedules_background_re
         ("user-1", ["video-1", "video-2"])
     ]
     assert refill_calls == [("user-1", "popularity", 40)]
+
+
+async def test_get_video_ids_tracks_users_for_following_sync_on_mixed_requests():
+    kv_feed_repository = StubKVFeedRepository()
+    service = FeedPoolService(
+        kv_feed_repository=kv_feed_repository,
+        feed_sync_service=StubFeedSyncService(),
+        settings=StubSettings(),
+    )
+
+    async def _fake_mixed(user_id, count):
+        assert user_id == USER_A
+        assert count == 3
+        return ["video-1"], {"mixed": 1}
+
+    service._get_mixed_video_ids = _fake_mixed
+
+    videos, sources = await service.get_video_ids(USER_A, 3, "mixed")
+
+    assert videos == ["video-1"]
+    assert sources == {"mixed": 1}
+    assert kv_feed_repository.tracked_following_users == [USER_A]
+
+
+async def test_following_pool_empty_does_not_trigger_request_time_clickhouse_sync():
+    kv_feed_repository = StubKVFeedRepository()
+    kv_feed_repository.user_pool_reads = []
+    feed_sync_service = StubFeedSyncService()
+    service = FeedPoolService(
+        kv_feed_repository=kv_feed_repository,
+        feed_sync_service=feed_sync_service,
+        settings=StubSettings(),
+    )
+
+    result = await service._fetch_pool_videos(USER_A, "following", 2)
+
+    assert result == []
+    assert feed_sync_service.following_sync_calls == []
+
+
+async def test_refill_ugc_reads_from_global_ugc_pool():
+    kv_feed_repository = StubKVFeedRepository()
+    service = FeedPoolService(
+        kv_feed_repository=kv_feed_repository,
+        feed_sync_service=StubFeedSyncService(),
+        settings=StubSettings(),
+    )
+
+    captured = []
+
+    async def _fake_get_global_pool(pool_name, limit, current_time=None):
+        captured.append((pool_name, limit))
+        return ["ugc-1", "ugc-2"]
+
+    async def _fake_filter_unseen(_user_id, video_ids):
+        return video_ids
+
+    async def _fake_add_user_pool_videos(user_id, pool_name, video_ids, ttl_sec=None):
+        assert user_id == USER_A
+        assert pool_name == "ugc"
+        assert video_ids == ["ugc-1", "ugc-2"]
+        return len(video_ids)
+
+    kv_feed_repository.get_global_pool = _fake_get_global_pool
+    kv_feed_repository.add_user_pool_videos = _fake_add_user_pool_videos
+    service._filter_unseen_videos = _fake_filter_unseen
+
+    inserted = await service.refill_ugc(USER_A, 2)
+
+    assert inserted == 2
+    assert captured == [("ugc", 200)]
 
 
 async def test_refill_pool_returns_refill_counts():

@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +33,17 @@ class _FakeClickHouseConnectClient:
 
     def close(self):
         self.closed = True
+
+
+class _RetryThenSuccessClient(_FakeClickHouseConnectClient):
+    def __init__(self, error_message=None):
+        super().__init__()
+        self.error_message = error_message
+
+    def query(self, query, parameters=None):
+        if self.error_message is not None:
+            raise RuntimeError(self.error_message)
+        return super().query(query, parameters)
 
 
 @pytest.mark.asyncio
@@ -105,3 +118,82 @@ async def test_clickhouse_client_uses_clickhouse_connect(monkeypatch):
         )
     ]
     assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_clickhouse_client_retries_retryable_query_failures(monkeypatch):
+    clients = [
+        _RetryThenSuccessClient("Connection timed out"),
+        _RetryThenSuccessClient(),
+    ]
+
+    def fake_get_client(**_kwargs):
+        return clients.pop(0)
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "clickhouse_connect",
+        SimpleNamespace(get_client=fake_get_client),
+    )
+
+    settings = Settings(
+        chat_api_base_url="https://example.com",
+        ic_gateway_base_url="https://ic0.app",
+        profile_canister_id="profile-id",
+        posts_canister_id="posts-id",
+        clickhouse_max_retries=1,
+        clickhouse_retry_backoff_sec=0.0,
+    )
+
+    client = build_clickhouse_client(settings)
+    rows = await client.fetch_all("SELECT 1")
+    await client.close()
+
+    assert rows == [
+        {"video_id": "video-1", "score": 10},
+        {"video_id": "video-2", "score": 20},
+    ]
+    assert clients == []
+
+
+@pytest.mark.asyncio
+async def test_clickhouse_client_uses_separate_clients_per_thread(monkeypatch):
+    created_clients = []
+
+    def fake_get_client(**_kwargs):
+        client = _FakeClickHouseConnectClient()
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "clickhouse_connect",
+        SimpleNamespace(get_client=fake_get_client),
+    )
+
+    settings = Settings(
+        chat_api_base_url="https://example.com",
+        ic_gateway_base_url="https://ic0.app",
+        profile_canister_id="profile-id",
+        posts_canister_id="posts-id",
+    )
+    client = build_clickhouse_client(settings)
+
+    barrier = threading.Barrier(2)
+    thread_clients = []
+
+    def use_client():
+        barrier.wait()
+        thread_clients.append(client._get_or_create_client())
+
+    threads = [threading.Thread(target=use_client) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    await client.close()
+
+    assert len(thread_clients) == 2
+    assert thread_clients[0] is not thread_clients[1]
+    assert len(created_clients) == 2

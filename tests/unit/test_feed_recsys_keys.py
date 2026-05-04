@@ -5,10 +5,7 @@ from src.utils.feed_recsys_keys import (
     feed_recsys_prefix,
     global_pool_key,
     job_lock_key,
-    ugc_discovery_pushes_key,
-    ugc_discovery_timestamps_key,
     user_bloom_key,
-    user_following_sync_key,
     user_pool_key,
     user_popularity_pointer_key,
     user_refill_lock_key,
@@ -39,9 +36,6 @@ def test_feed_recsys_key_builders_use_storage_namespace():
     assert user_served_recent_key(settings, "user-1") == (
         "staging:feed_recsys:{user:user-1}:served_recent"
     )
-    assert user_following_sync_key(settings, "user-1") == (
-        "staging:feed_recsys:{user:user-1}:following:last_sync"
-    )
     assert user_popularity_pointer_key(settings, "user-1") == (
         "staging:feed_recsys:{user:user-1}:pop_percentile_pointer"
     )
@@ -55,12 +49,6 @@ def test_feed_recsys_key_builders_use_storage_namespace():
     assert ai_influencer_ids_key(settings) == "staging:feed_recsys:{GLOBAL}:lookup:ai_influencer_ids"
     assert video_view_count_key(settings, "video-1") == (
         "staging:feed_recsys:{GLOBAL}:view_counts:video-1"
-    )
-    assert ugc_discovery_timestamps_key(settings) == (
-        "staging:feed_recsys:{GLOBAL}:ugc_discovery:timestamps"
-    )
-    assert ugc_discovery_pushes_key(settings) == (
-        "staging:feed_recsys:{GLOBAL}:ugc_discovery:pushes"
     )
     assert job_lock_key(settings, "freshness_sync") == (
         "staging:feed_recsys:{GLOBAL}:jobs:lock:freshness_sync"

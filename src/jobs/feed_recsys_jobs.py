@@ -1,3 +1,5 @@
+import time
+
 import sentry_sdk
 
 from src.core.dependencies import build_runtime_objects, close_runtime_objects
@@ -42,12 +44,12 @@ async def run_feed_recsys_ugc_sync(kvrocks_client) -> None:
     )
 
 
-async def run_feed_recsys_ugc_discovery_sync(kvrocks_client) -> None:
+async def run_feed_recsys_following_sync(kvrocks_client) -> None:
     await _run_locked_job(
         kvrocks_client,
-        "ugc_discovery_sync",
-        get_settings().feed_recsys_ugc_discovery_sync_interval_sec,
-        "sync_ugc_discovery_pool",
+        "following_sync",
+        get_settings().feed_recsys_following_sync_interval_sec,
+        "sync_tracked_following_pools",
     )
 
 
@@ -85,9 +87,22 @@ async def _run_locked_job(
         return
 
     runtime = build_runtime_objects(kvrocks_client, settings)
+    started_at = time.monotonic()
     try:
+        log.info(
+            "Feed recsys job started",
+            extra={"job": job_name},
+        )
         service_method = getattr(runtime["feed_sync_service"], service_method_name)
-        await service_method()
+        result = await service_method()
+        log.info(
+            "Feed recsys job completed",
+            extra={
+                "job": job_name,
+                "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                "result": result,
+            },
+        )
     except Exception as exc:
         sentry_sdk.capture_exception(exc)
         log.exception("Feed recsys job failed", extra={"job": job_name})

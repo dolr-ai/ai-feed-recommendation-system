@@ -2,7 +2,11 @@ from src.services.video_metadata_service import VideoMetadataService
 
 
 class StubClickHouseVideoMetadataRepository:
+    def __init__(self):
+        self.calls = []
+
     async def get_video_metadata_batch(self, video_ids):
+        self.calls.append(video_ids)
         return {
             "video-1": {
                 "canister_id": "cid-1",
@@ -19,10 +23,11 @@ class StubClickHouseVideoMetadataRepository:
 
 class StubKVVideoMetadataRepository:
     def __init__(self):
-        self.calls = []
+        self.read_calls = []
+        self.write_calls = []
 
     async def get_video_metadata_batch(self, video_ids):
-        self.calls.append(video_ids)
+        self.read_calls.append(video_ids)
         return {
             "video-2": {
                 "canister_id": "cid-2",
@@ -35,6 +40,10 @@ class StubKVVideoMetadataRepository:
                 "publisher_user_id": "publisher-3",
             },
         }
+
+    async def cache_video_metadata_batch(self, metadata_by_video_id):
+        self.write_calls.append(metadata_by_video_id)
+        return len(metadata_by_video_id)
 
 
 class StubKVFeedRepository:
@@ -73,11 +82,12 @@ class StubSettings:
 
 
 async def test_video_metadata_service_builds_rows_and_attaches_ai_influencer_flags():
+    clickhouse_repo = StubClickHouseVideoMetadataRepository()
     fallback_repo = StubKVVideoMetadataRepository()
     kv_feed_repository = StubKVFeedRepository()
     offchain_rewards_client = StubOffchainRewardsClient()
     service = VideoMetadataService(
-        clickhouse_video_metadata_repository=StubClickHouseVideoMetadataRepository(),
+        clickhouse_video_metadata_repository=clickhouse_repo,
         kv_video_metadata_repository=fallback_repo,
         kv_feed_repository=kv_feed_repository,
         offchain_rewards_client=offchain_rewards_client,
@@ -86,7 +96,17 @@ async def test_video_metadata_service_builds_rows_and_attaches_ai_influencer_fla
 
     rows = await service.build_video_rows(["video-2", "video-1", "video-3", "missing"])
 
-    assert fallback_repo.calls == [["video-2", "video-3", "missing"]]
+    assert fallback_repo.read_calls == [["video-2", "video-1", "video-3", "missing"]]
+    assert clickhouse_repo.calls == [["video-1", "missing"]]
+    assert fallback_repo.write_calls == [
+        {
+            "video-1": {
+                "canister_id": "cid-1",
+                "post_id": "11",
+                "publisher_user_id": "publisher-1",
+            }
+        }
+    ]
     assert kv_feed_repository.cached_reads == [["video-2", "video-1", "video-3", "missing"]]
     assert kv_feed_repository.cached_writes == [
         {
@@ -97,7 +117,7 @@ async def test_video_metadata_service_builds_rows_and_attaches_ai_influencer_fla
     assert offchain_rewards_client.calls == [["video-2", "video-3", "missing"]]
     assert [row.video_id for row in rows] == ["video-2", "video-1", "video-3"]
     assert rows[0].canister_id == "cid-2"
-    assert rows[0].post_id == "22"
+    assert rows[0].post_id == "fallback-22"
     assert rows[0].publisher_user_id == "publisher-2"
     assert rows[0].from_ai_influencer is False
     assert rows[0].num_views_loggedin == 56

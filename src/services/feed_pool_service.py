@@ -22,6 +22,7 @@ class FeedPoolService:
         rec_type: str,
     ) -> tuple[list[str], dict[str, int]]:
         await self._bootstrap_if_needed(user_id)
+        await self._register_following_sync_user(user_id, rec_type)
 
         if rec_type == "mixed":
             return await self._get_mixed_video_ids(user_id, count)
@@ -143,6 +144,8 @@ class FeedPoolService:
                 current_time=int(time.time()),
             )
             if not candidates:
+                if pool_name == "following":
+                    break
                 attempts += 1
                 refill_target = max(count * 2, self._settings.feed_recsys_refill_threshold)
                 await self._refill_pool(user_id, pool_name, refill_target)
@@ -174,6 +177,8 @@ class FeedPoolService:
                 )
 
             if len(selected) < count:
+                if pool_name == "following":
+                    break
                 attempts += 1
                 refill_target = max(count * 2, self._settings.feed_recsys_refill_threshold)
                 await self._refill_pool(user_id, pool_name, refill_target)
@@ -242,7 +247,7 @@ class FeedPoolService:
         if pool_name == "ugc":
             return await self.refill_ugc(user_id, target)
         if pool_name == "following":
-            return await self.refill_following(user_id)
+            return 0
         if pool_name == "fallback":
             return await self.refill_fallback(user_id, target)
         return 0
@@ -306,7 +311,7 @@ class FeedPoolService:
     async def refill_ugc(self, user_id: str, target: int) -> int:
         await self._kv_feed_repository.ensure_user_bloom(user_id)
         global_ids = await self._kv_feed_repository.get_global_pool(
-            "ugc_discovery",
+            "ugc",
             max(target * 3, self._settings.feed_recsys_refill_threshold),
             current_time=int(time.time()),
         )
@@ -317,20 +322,6 @@ class FeedPoolService:
             candidates[:target],
             ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
         )
-
-    async def refill_following(self, user_id: str) -> int:
-        now = int(time.time())
-        last_sync = await self._kv_feed_repository.get_following_sync_time(user_id)
-        if last_sync is not None and (now - last_sync) < self._settings.feed_recsys_following_sync_cooldown_sec:
-            return 0
-
-        await self._kv_feed_repository.set_following_sync_time(
-            user_id,
-            now,
-            ttl_sec=self._settings.feed_recsys_following_sync_cooldown_sec * 2,
-        )
-        result = await self._feed_sync_service.sync_user_following_pool(user_id)
-        return int(result.get("added") or 0)
 
     async def refill_fallback(self, user_id: str, target: int) -> int:
         fallback_sources = [
@@ -397,15 +388,12 @@ class FeedPoolService:
         remaining_count: int,
     ) -> None:
         if pool_name == "following":
-            threshold = max(
-                self._settings.feed_recsys_following_refill_threshold,
-                request_count,
-            )
-        else:
-            threshold = max(
-                self._settings.feed_recsys_background_refill_threshold,
-                request_count * 2,
-            )
+            return
+
+        threshold = max(
+            self._settings.feed_recsys_background_refill_threshold,
+            request_count * 2,
+        )
 
         if remaining_count >= threshold:
             return
@@ -449,6 +437,18 @@ class FeedPoolService:
             )
         finally:
             await self._kv_feed_repository.release_refill_lock(user_id, pool_name)
+
+    async def _register_following_sync_user(self, user_id: str, rec_type: str) -> None:
+        if rec_type not in {"mixed", "following"}:
+            return
+        try:
+            await self._kv_feed_repository.track_following_sync_user(user_id)
+        except Exception:
+            self._log.warning(
+                "Feed recsys failed to register user for following sync",
+                extra={"user_id": user_id, "rec_type": rec_type},
+                exc_info=True,
+            )
 
     @staticmethod
     def _intersperse_ugc(videos: list[str], ugc_videos: list[str]) -> list[str]:
