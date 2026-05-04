@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from typing import Any, Optional
+
+from src.services.logger_service import LoggerService
 
 
 class ClickHouseClient:
     def __init__(self, settings):
         self._settings = settings
-        self._client: Optional[Any] = None
+        self._clients_by_thread: dict[int, Any] = {}
+        self._clients_lock = threading.Lock()
+        self._log = LoggerService().get("clickhouse_client")
 
     async def fetch_all(
         self,
@@ -48,21 +54,19 @@ class ClickHouseClient:
         parameters: Optional[dict[str, Any]] = None,
     ) -> Any:
         return await asyncio.to_thread(
-            self._get_or_create_client().command,
+            self._execute_command,
             query,
-            parameters=parameters or {},
+            parameters or {},
         )
 
     async def ping(self) -> bool:
         return bool(await self.fetch_scalar("SELECT 1"))
 
     async def close(self) -> None:
-        if self._client is None:
+        clients = self._drain_clients()
+        if not clients:
             return
-        client = self._client
-        self._client = None
-        if hasattr(client, "close"):
-            await asyncio.to_thread(client.close)
+        await asyncio.to_thread(self._close_clients_sync, clients)
 
     async def aclose(self) -> None:
         await self.close()
@@ -72,8 +76,9 @@ class ClickHouseClient:
         query: str,
         parameters: dict[str, Any],
     ) -> tuple[list[tuple[Any, ...]], list[str]]:
-        query_result = self._get_or_create_client().query(
-            query,
+        query_result = self._run_with_retry(
+            operation="query",
+            query=query,
             parameters=parameters,
         )
         rows = list(
@@ -86,9 +91,73 @@ class ClickHouseClient:
         column_names = list(getattr(query_result, "column_names", []))
         return rows, column_names
 
+    def _execute_command(
+        self,
+        query: str,
+        parameters: dict[str, Any],
+    ) -> Any:
+        return self._run_with_retry(
+            operation="command",
+            query=query,
+            parameters=parameters,
+        )
+
+    def _run_with_retry(
+        self,
+        operation: str,
+        query: str,
+        parameters: dict[str, Any],
+    ) -> Any:
+        max_attempts = 1 + max(0, self._settings.clickhouse_max_retries)
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                client = self._get_or_create_client()
+                if operation == "command":
+                    return client.command(query, parameters=parameters)
+                return client.query(query, parameters=parameters)
+            except Exception as exc:
+                last_error = exc
+                retryable = self._is_retryable(exc)
+                self._discard_current_thread_client()
+                if not retryable or attempt >= max_attempts:
+                    self._log.error(
+                        "ClickHouse operation failed",
+                        extra={
+                            "operation": operation,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "retryable": retryable,
+                            "error_type": type(exc).__name__,
+                            "query_preview": self._query_preview(query),
+                        },
+                        exc_info=True,
+                    )
+                    raise
+
+                sleep_sec = self._settings.clickhouse_retry_backoff_sec * attempt
+                self._log.warning(
+                    "ClickHouse operation retrying",
+                    extra={
+                        "operation": operation,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "sleep_sec": sleep_sec,
+                        "error_type": type(exc).__name__,
+                        "query_preview": self._query_preview(query),
+                    },
+                )
+                time.sleep(sleep_sec)
+
+        raise last_error or RuntimeError("ClickHouse operation failed without an exception")
+
     def _get_or_create_client(self) -> Any:
-        if self._client is not None:
-            return self._client
+        thread_id = threading.get_ident()
+        with self._clients_lock:
+            client = self._clients_by_thread.get(thread_id)
+        if client is not None:
+            return client
 
         try:
             from clickhouse_connect import get_client
@@ -97,7 +166,7 @@ class ClickHouseClient:
                 "clickhouse-connect is required for ClickHouse access."
             ) from exc
 
-        self._client = get_client(
+        client = get_client(
             host=self._settings.clickhouse_host,
             port=self._settings.clickhouse_port,
             database=self._settings.clickhouse_database,
@@ -108,7 +177,55 @@ class ClickHouseClient:
             connect_timeout=self._settings.clickhouse_connect_timeout_sec,
             send_receive_timeout=self._settings.clickhouse_query_timeout_sec,
         )
-        return self._client
+        with self._clients_lock:
+            self._clients_by_thread[thread_id] = client
+        return client
+
+    def _discard_current_thread_client(self) -> None:
+        thread_id = threading.get_ident()
+        with self._clients_lock:
+            client = self._clients_by_thread.pop(thread_id, None)
+        if client is None:
+            return
+        self._close_client_sync(client)
+
+    def _drain_clients(self) -> list[Any]:
+        with self._clients_lock:
+            clients = list(self._clients_by_thread.values())
+            self._clients_by_thread.clear()
+        return clients
+
+    def _close_clients_sync(self, clients: list[Any]) -> None:
+        for client in clients:
+            self._close_client_sync(client)
+
+    @staticmethod
+    def _close_client_sync(client: Any) -> None:
+        if hasattr(client, "close"):
+            client.close()
+
+    @staticmethod
+    def _query_preview(query: str) -> str:
+        compact = " ".join(query.split())
+        return compact[:160]
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        message = str(exc).lower()
+        retryable_markers = (
+            "attempt to execute concurrent queries within the same session",
+            "connection refused",
+            "connect timeout",
+            "connection timed out",
+            "timed out",
+            "max retries exceeded",
+            "temporarily unavailable",
+            "connection reset",
+            "server disconnected",
+            "network is unreachable",
+            "broken pipe",
+        )
+        return any(marker in message for marker in retryable_markers)
 
 
 def build_clickhouse_client(settings):

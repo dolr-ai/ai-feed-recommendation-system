@@ -66,38 +66,66 @@ class VideoMetadataService:
 
     async def _get_resolved_metadata(self, video_ids: list[str]) -> dict[str, dict]:
         unique_video_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
-        clickhouse_metadata = (
-            await self._clickhouse_video_metadata_repository.get_video_metadata_batch(
-                unique_video_ids
-            )
-        )
+        if not unique_video_ids:
+            return {}
+
+        cached_metadata: dict[str, dict] = {}
+        if self._kv_video_metadata_repository is not None:
+            try:
+                cached_metadata = await self._kv_video_metadata_repository.get_video_metadata_batch(
+                    unique_video_ids
+                )
+            except Exception:
+                self._log.warning(
+                    "Central video metadata cache lookup failed",
+                    extra={"video_count": len(unique_video_ids)},
+                    exc_info=True,
+                )
+
         fallback_video_ids = [
             video_id
             for video_id in unique_video_ids
-            if not self._has_required_metadata(clickhouse_metadata.get(video_id))
+            if not self._has_required_metadata(cached_metadata.get(video_id))
         ]
-        if not fallback_video_ids or self._kv_video_metadata_repository is None:
+        if not fallback_video_ids:
             return {
-                video_id: self._normalize_metadata(clickhouse_metadata.get(video_id))
+                video_id: self._normalize_metadata(cached_metadata.get(video_id))
                 for video_id in unique_video_ids
             }
 
-        fallback_metadata: dict[str, dict] = {}
         try:
-            fallback_metadata = await self._kv_video_metadata_repository.get_video_metadata_batch(
-                fallback_video_ids
+            clickhouse_metadata = (
+                await self._clickhouse_video_metadata_repository.get_video_metadata_batch(
+                    fallback_video_ids
+                )
             )
         except Exception:
-            self._log.warning(
-                "Central video metadata fallback lookup failed",
+            self._log.error(
+                "ClickHouse video metadata lookup failed",
                 extra={"video_count": len(fallback_video_ids)},
                 exc_info=True,
             )
+            raise
+        if clickhouse_metadata and self._kv_video_metadata_repository is not None:
+            try:
+                await self._kv_video_metadata_repository.cache_video_metadata_batch(
+                    {
+                        video_id: row
+                        for video_id, row in clickhouse_metadata.items()
+                        if self._has_required_metadata(row)
+                    }
+                )
+            except Exception:
+                self._log.warning(
+                    "Central video metadata cache backfill failed",
+                    extra={"video_count": len(clickhouse_metadata)},
+                    exc_info=True,
+                )
 
         return {
             video_id: self._merge_metadata_rows(
+                cached_metadata.get(video_id),
                 clickhouse_metadata.get(video_id),
-                fallback_metadata.get(video_id),
             )
             for video_id in unique_video_ids
         }

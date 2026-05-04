@@ -6,6 +6,9 @@ from src.jobs import feed_recsys_jobs
 
 
 class _StubLogger:
+    def info(self, *_args, **_kwargs) -> None:
+        pass
+
     def debug(self, *_args, **_kwargs) -> None:
         pass
 

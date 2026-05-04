@@ -12,6 +12,7 @@ class FeedSyncService:
         self,
         clickhouse_feed_repository,
         clickhouse_video_metadata_repository,
+        kv_video_metadata_repository,
         kv_feed_repository,
         chat_api_client,
         offchain_rewards_client,
@@ -19,6 +20,7 @@ class FeedSyncService:
     ):
         self._clickhouse_feed_repository = clickhouse_feed_repository
         self._clickhouse_video_metadata_repository = clickhouse_video_metadata_repository
+        self._kv_video_metadata_repository = kv_video_metadata_repository
         self._kv_feed_repository = kv_feed_repository
         self._chat_api_client = chat_api_client
         self._offchain_rewards_client = offchain_rewards_client
@@ -119,17 +121,37 @@ class FeedSyncService:
             user_id,
             "following",
             filtered_ids,
-            ttl_sec=self._settings.feed_recsys_pool_ttl_sec,
-        )
-        await self._kv_feed_repository.set_following_sync_time(
-            user_id,
-            ttl_sec=self._settings.feed_recsys_following_sync_cooldown_sec * 2,
+            ttl_sec=self._settings.feed_recsys_following_pool_ttl_sec,
         )
         self._log.debug(
             "Feed recsys following sync completed",
             extra={"user_id": user_id, "video_count": added},
         )
         return {"fetched": len(rows), "added": added}
+
+    async def sync_tracked_following_pools(self) -> dict[str, int]:
+        user_ids = await self._kv_feed_repository.get_tracked_following_sync_users()
+        synced_users = 0
+        synced_videos = 0
+
+        for user_id in user_ids:
+            try:
+                result = await self.sync_user_following_pool(user_id)
+            except Exception:
+                self._log.warning(
+                    "Feed recsys following sync failed for user",
+                    extra={"user_id": user_id},
+                    exc_info=True,
+                )
+                continue
+            synced_users += 1
+            synced_videos += int(result.get("added") or 0)
+
+        self._log.debug(
+            "Feed recsys tracked following sync completed",
+            extra={"user_count": synced_users, "video_count": synced_videos},
+        )
+        return {"users": synced_users, "videos": synced_videos}
 
     async def sync_ugc_pool(self) -> dict[str, int]:
         rows = await self._clickhouse_feed_repository.get_ugc_videos(
@@ -145,38 +167,6 @@ class FeedSyncService:
         )
         self._log.debug(
             "Feed recsys ugc sync completed",
-            extra={"video_count": inserted},
-        )
-        return {"videos": inserted}
-
-    async def sync_ugc_discovery_pool(self) -> dict[str, int]:
-        rows = await self._clickhouse_feed_repository.get_ugc_discovery_videos(
-            max_views=self._settings.feed_recsys_ugc_discovery_max_views,
-            max_age_days=self._settings.feed_recsys_ugc_discovery_max_age_days,
-            limit=self._settings.feed_recsys_ugc_discovery_pool_limit,
-        )
-        filtered_ids = await self._filter_video_ids_with_metadata(
-            [row["video_id"] for row in rows if row.get("video_id")]
-        )
-        filtered_set = set(filtered_ids)
-        discovery_rows = [
-            {
-                "video_id": row["video_id"],
-                "upload_timestamp": self._to_unix_timestamp(row.get("upload_timestamp")),
-            }
-            for row in rows
-            if row.get("video_id") in filtered_set
-        ]
-        inserted = await self._kv_feed_repository.replace_ugc_discovery_pool(
-            discovery_rows,
-            ttl_sec=self._settings.feed_recsys_ugc_discovery_pool_ttl_sec,
-        )
-        await self._prewarm_video_view_count_cache(
-            filtered_ids,
-            source="ugc_discovery",
-        )
-        self._log.debug(
-            "Feed recsys ugc discovery sync completed",
             extra={"video_count": inserted},
         )
         return {"videos": inserted}
@@ -212,13 +202,16 @@ class FeedSyncService:
             metadata = await self._clickhouse_video_metadata_repository.get_video_metadata_batch(
                 batch
             )
-            result.extend(
-                [
-                    video_id
-                    for video_id in batch
-                    if self._has_required_metadata(metadata.get(video_id))
-                ]
-            )
+            eligible_metadata = {
+                video_id: metadata[video_id]
+                for video_id in batch
+                if self._has_required_metadata(metadata.get(video_id))
+            }
+            if eligible_metadata and self._kv_video_metadata_repository is not None:
+                await self._kv_video_metadata_repository.cache_video_metadata_batch(
+                    eligible_metadata
+                )
+            result.extend(eligible_metadata.keys())
         return result
 
     async def _prewarm_video_view_count_cache(

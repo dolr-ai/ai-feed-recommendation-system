@@ -7,11 +7,9 @@ from typing import Iterable, Optional
 from src.utils.feed_recsys_keys import (
     ai_influencer_ids_key,
     excluded_videos_key,
+    following_sync_users_key,
     global_pool_key,
-    ugc_discovery_pushes_key,
-    ugc_discovery_timestamps_key,
     user_bloom_key,
-    user_following_sync_key,
     user_pool_key,
     user_popularity_pointer_key,
     user_refill_lock_key,
@@ -135,6 +133,27 @@ class KVFeedRepository:
             user_ids,
         )
 
+    async def track_following_sync_user(self, user_id: str) -> bool:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+        return bool(
+            await self._client.sadd(
+                following_sync_users_key(self._settings),
+                normalized_user_id,
+            )
+        )
+
+    async def get_tracked_following_sync_users(self) -> list[str]:
+        if hasattr(self._client, "smembers"):
+            user_ids = await self._client.smembers(following_sync_users_key(self._settings))
+        else:
+            user_ids = await self._client.execute_command(
+                "SMEMBERS",
+                following_sync_users_key(self._settings),
+            )
+        return sorted(user_id for user_id in user_ids if user_id)
+
     async def check_ai_influencer_ids(self, user_ids: list[str]) -> dict[str, bool]:
         if not user_ids:
             return {}
@@ -254,30 +273,6 @@ class KVFeedRepository:
         await self._client.zremrangebyscore(key, "-inf", now)
         return int(await self._client.zcount(key, now, "+inf"))
 
-    async def get_following_sync_time(self, user_id: str) -> Optional[int]:
-        value = await self._client.get(user_following_sync_key(self._settings, user_id))
-        if value is None:
-            return None
-        return int(value)
-
-    async def set_following_sync_time(
-        self,
-        user_id: str,
-        unix_ts: Optional[int] = None,
-        ttl_sec: Optional[int] = None,
-    ) -> bool:
-        timestamp = unix_ts if unix_ts is not None else self._now()
-        kwargs = {}
-        if ttl_sec is not None:
-            kwargs["ex"] = ttl_sec
-        return bool(
-            await self._client.set(
-                user_following_sync_key(self._settings, user_id),
-                timestamp,
-                **kwargs,
-            )
-        )
-
     async def get_popularity_pointer(
         self,
         user_id: str,
@@ -380,50 +375,6 @@ class KVFeedRepository:
         await pipe.execute()
         return count
 
-    async def get_ugc_discovery_push_counts(self) -> dict[str, int]:
-        raw = await self._client.hgetall(ugc_discovery_pushes_key(self._settings))
-        return {
-            key: int(value)
-            for key, value in raw.items()
-        }
-
-    async def replace_ugc_discovery_pool(
-        self,
-        videos: list[dict],
-        ttl_sec: Optional[int] = None,
-    ) -> int:
-        pool_key = global_pool_key(self._settings, "ugc_discovery")
-        timestamps_key = ugc_discovery_timestamps_key(self._settings)
-        pushes_key = ugc_discovery_pushes_key(self._settings)
-        existing_push_counts = await self.get_ugc_discovery_push_counts()
-        ttl = ttl_sec or self._settings.feed_recsys_ugc_discovery_pool_ttl_sec
-        expiry = self._expiry_timestamp(ttl)
-        new_video_ids = {
-            row["video_id"]
-            for row in videos
-            if row.get("video_id")
-        }
-
-        pipe = self._client.pipeline()
-        pipe.delete(pool_key)
-        pipe.delete(timestamps_key)
-
-        for row in videos:
-            video_id = row["video_id"]
-            upload_timestamp = int(row["upload_timestamp"])
-            pipe.zadd(pool_key, {video_id: float(expiry)})
-            pipe.hset(timestamps_key, video_id, upload_timestamp)
-            if video_id not in existing_push_counts:
-                pipe.hset(pushes_key, video_id, 0)
-
-        stale_video_ids = sorted(set(existing_push_counts) - new_video_ids)
-        if stale_video_ids:
-            pipe.hdel(pushes_key, *stale_video_ids)
-
-        pipe.expire(pool_key, ttl)
-        await pipe.execute()
-        return len(new_video_ids)
-
     async def _get_pool(
         self,
         key: str,
@@ -490,17 +441,13 @@ class KVFeedRepository:
 
     async def _replace_set(self, key: str, values: Iterable[str]) -> int:
         unique_values = list(dict.fromkeys(value for value in values if value))
-        temp_key = f"{key}:tmp"
-
         if not unique_values:
-            await self._client.delete(temp_key)
             await self._client.delete(key)
             return 0
 
         pipe = self._client.pipeline()
-        pipe.delete(temp_key)
-        pipe.sadd(temp_key, *unique_values)
-        pipe.rename(temp_key, key)
+        pipe.delete(key)
+        pipe.sadd(key, *unique_values)
         await pipe.execute()
         return len(unique_values)
 

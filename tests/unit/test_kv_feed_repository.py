@@ -4,8 +4,6 @@ from src.repository.kv_feed_repository import KVFeedRepository
 from src.utils.feed_recsys_keys import (
     ai_influencer_ids_key,
     global_pool_key,
-    ugc_discovery_pushes_key,
-    ugc_discovery_timestamps_key,
     user_refill_lock_key,
     user_served_recent_key,
     video_view_count_key,
@@ -188,7 +186,7 @@ async def test_check_ai_influencer_ids_uses_set_membership():
     ]
 
 
-async def test_replace_ai_influencer_ids_swaps_temp_set():
+async def test_replace_ai_influencer_ids_rewrites_target_set():
     client = FakeClient()
     settings = build_settings(storage_namespace="staging")
     repo = KVFeedRepository(client, settings)
@@ -199,37 +197,9 @@ async def test_replace_ai_influencer_ids_swaps_temp_set():
     pipe = client.pipelines[0]
     target_key = ai_influencer_ids_key(settings)
     assert pipe.ops == [
-        ("delete", (f"{target_key}:tmp",)),
-        ("sadd", f"{target_key}:tmp", ("user-1", "user-2")),
-        ("rename", f"{target_key}:tmp", target_key),
+        ("delete", (target_key,)),
+        ("sadd", target_key, ("user-1", "user-2")),
     ]
-
-
-async def test_replace_ugc_discovery_pool_preserves_push_counts_and_cleans_stale(monkeypatch):
-    monkeypatch.setattr(kv_feed_repository_module.time, "time", lambda: 2000)
-    client = FakeClient()
-    settings = build_settings(storage_namespace="staging")
-    client.hgetall_result = {"video-1": "7", "stale-video": "3"}
-    repo = KVFeedRepository(client, settings)
-
-    count = await repo.replace_ugc_discovery_pool(
-        [
-            {"video_id": "video-1", "upload_timestamp": 101},
-            {"video_id": "video-2", "upload_timestamp": 202},
-        ],
-        ttl_sec=120,
-    )
-
-    assert count == 2
-    pipe = client.pipelines[0]
-    pool_key = global_pool_key(settings, "ugc_discovery")
-    timestamps_key = ugc_discovery_timestamps_key(settings)
-    pushes_key = ugc_discovery_pushes_key(settings)
-    assert pipe.ops[0] == ("delete", (pool_key,))
-    assert pipe.ops[1] == ("delete", (timestamps_key,))
-    assert ("hset", pushes_key, "video-2", 0) in pipe.ops
-    assert ("hdel", pushes_key, ("stale-video",)) in pipe.ops
-    assert ("expire", pool_key, 120) in pipe.ops
 
 
 async def test_set_popularity_pointer_preserves_existing_ttl():

@@ -28,8 +28,8 @@ def user_served_recent_key(settings: Settings, user_id: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:served_recent"
 
 
-def user_following_sync_key(settings: Settings, user_id: str) -> str:
-    return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:following:last_sync"
+def following_sync_users_key(settings: Settings) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_global_slot()}:following:users"
 
 
 def user_popularity_pointer_key(settings: Settings, user_id: str) -> str:
@@ -50,14 +50,6 @@ def excluded_videos_key(settings: Settings) -> str:
 
 def ai_influencer_ids_key(settings: Settings) -> str:
     return f"{feed_recsys_prefix(settings)}:{_global_slot()}:lookup:ai_influencer_ids"
-
-
-def ugc_discovery_timestamps_key(settings: Settings) -> str:
-    return f"{feed_recsys_prefix(settings)}:{_global_slot()}:ugc_discovery:timestamps"
-
-
-def ugc_discovery_pushes_key(settings: Settings) -> str:
-    return f"{feed_recsys_prefix(settings)}:{_global_slot()}:ugc_discovery:pushes"
 
 
 def job_lock_key(settings: Settings, job_name: str) -> str:

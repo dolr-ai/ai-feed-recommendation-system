@@ -160,54 +160,6 @@ class ClickHouseFeedRepository:
             self._limit_parameters(limit),
         )
 
-    async def get_ugc_discovery_videos(
-        self,
-        max_views: int = 200,
-        max_age_days: int = 7,
-        limit: Optional[int] = None,
-    ) -> list[dict]:
-        query = f"""
-        WITH
-            {self._rejected_and_excluded_ctes()},
-            {self._valid_videos_cte(include_approval_source=True)},
-            ugc_sources AS (
-                SELECT
-                    video_id,
-                    upload_timestamp
-                FROM {self._table("ai_ugc")} FINAL
-                WHERE upload_timestamp IS NOT NULL
-                  AND publisher_user_id IS NOT NULL
-
-                UNION ALL
-
-                SELECT
-                    video_id,
-                    created_at AS upload_timestamp
-                FROM {self._table("ugc_content_approval")} FINAL
-                WHERE is_approved = 1
-                  AND created_at IS NOT NULL
-            )
-        SELECT DISTINCT
-            us.video_id,
-            us.upload_timestamp,
-            coalesce(vs.total_impressions, 0) AS impression_count
-        FROM ugc_sources us
-        INNER JOIN valid_videos vv
-            ON us.video_id = vv.video_id
-        LEFT JOIN {self._table("video_statistics")} AS vs FINAL
-            ON us.video_id = vs.video_id
-        WHERE us.upload_timestamp >= now() - INTERVAL %(max_age_days)s DAY
-          AND coalesce(vs.total_impressions, 0) < %(max_views)s
-        ORDER BY us.upload_timestamp DESC, us.video_id
-        {self._limit_clause(limit)}
-        """
-        parameters = {
-            "max_views": max_views,
-            "max_age_days": max_age_days,
-            **self._limit_parameters(limit),
-        }
-        return await self._client.fetch_all(dedent(query).strip(), parameters)
-
     async def get_following_video_candidates(
         self,
         user_id: str,

@@ -11,6 +11,10 @@ class FakePipeline:
         self.ops.append(("hgetall", key))
         return self
 
+    def hset(self, key, mapping=None):
+        self.ops.append(("hset", key, mapping))
+        return self
+
     async def execute(self):
         return self.results
 
@@ -78,3 +82,47 @@ async def test_get_video_metadata_batch_returns_empty_when_client_missing():
     metadata = await repo.get_video_metadata_batch(["video-1"])
 
     assert metadata == {}
+
+
+async def test_cache_video_metadata_batch_writes_persistent_shared_hash_payload():
+    client = FakeClient(pipeline_results=[[]])
+    repo = KVVideoMetadataRepository(client, build_settings())
+
+    inserted = await repo.cache_video_metadata_batch(
+        {
+            "video-1": {
+                "canister_id": "cid-1",
+                "post_id": "11",
+                "publisher_user_id": "user-1",
+            },
+            "video-2": {
+                "upload_canister_id": "2vxsx-fae",
+                "post_id": "22",
+                "publisher_user_id": "user-2",
+            },
+        }
+    )
+
+    assert inserted == 2
+    assert client.pipelines[0].ops == [
+        (
+            "hset",
+            "offchain:metadata:video_details:video-1",
+            {
+                "video_id": "video-1",
+                "canister_id": "cid-1",
+                "post_id": "11",
+                "publisher_user_id": "user-1",
+            },
+        ),
+        (
+            "hset",
+            "offchain:metadata:video_details:video-2",
+            {
+                "video_id": "video-2",
+                "canister_id": "profile-id",
+                "post_id": "22",
+                "publisher_user_id": "user-2",
+            },
+        ),
+    ]
