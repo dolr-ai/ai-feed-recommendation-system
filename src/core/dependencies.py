@@ -54,7 +54,6 @@ def build_runtime_objects(kvrocks_client, settings=None) -> dict:
         kv_video_metadata_repository=kv_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
         chat_api_client=chat_api_client,
-        offchain_rewards_client=offchain_rewards_client,
         settings=resolved_settings,
     )
     video_metadata_service = VideoMetadataService(

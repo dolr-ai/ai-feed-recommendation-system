@@ -1,6 +1,6 @@
 from typing import Dict, List, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 FeedRecType = Literal["mixed", "popularity", "freshness", "following", "ugc", "fallback"]
@@ -27,3 +27,26 @@ class FeedRecommendationWithMetadataResponse(BaseModel):
     count: int
     sources: Dict[str, int]
     timestamp: int
+
+
+class FeedViewCountSnapshotRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    video_id: str = Field(min_length=1)
+    total_count_loggedin: int = Field(ge=0)
+    total_count_all: int = Field(ge=0)
+    count: int | None = Field(default=None, ge=0)
+    last_milestone: int | None = Field(default=None, ge=0)
+
+    @field_validator("video_id")
+    @classmethod
+    def validate_video_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("video_id must not be blank")
+        return normalized
+
+
+class FeedViewCountPushResponse(BaseModel):
+    received: int
+    upserted: int

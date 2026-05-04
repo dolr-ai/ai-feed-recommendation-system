@@ -179,7 +179,7 @@ What they do:
 - read source data from ClickHouse
 - filter to valid and allowed videos
 - write shared pools and lookup sets into KVRocks
-- prewarm per-video view-count cache for hot shared videos where configured
+- do not populate per-video view-count cache during sync
 
 ## Metadata And Count Enrichment
 
@@ -202,6 +202,9 @@ Required for a video to stay in the final response:
 Resolution order:
 1. KVRocks view-count cache
 2. off-chain rewards bulk API for misses
+
+Additional cache-fill path:
+- `POST /api/v1/internal/feed-recsys/view-counts` writes into the same cache keys used by request-path fallback
 
 Cache design:
 - key is global per `video_id`
