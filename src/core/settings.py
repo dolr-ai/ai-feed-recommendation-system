@@ -99,8 +99,6 @@ class Settings(BaseSettings):
     feed_recsys_bloom_expansion: int = 4
     feed_recsys_percentile_pointer_ttl_sec: int = 24 * 60 * 60
     feed_recsys_view_count_ttl_sec: int = 12 * 60 * 60
-    feed_recsys_view_count_prewarm_enabled: bool = True
-    feed_recsys_view_count_prewarm_batch_size: int = 500
 
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30

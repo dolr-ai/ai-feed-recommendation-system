@@ -17,6 +17,38 @@ from src.utils.feed_recsys_keys import (
     video_view_count_key,
 )
 
+_UPSERT_VIDEO_VIEW_COUNTS_SCRIPT = """
+local key = KEYS[1]
+local incoming_loggedin = tonumber(ARGV[1]) or 0
+local incoming_all = tonumber(ARGV[2]) or 0
+local ttl = tonumber(ARGV[3]) or 0
+
+local existing_loggedin = 0
+local existing_all = 0
+local raw = redis.call("GET", key)
+
+if raw then
+    local ok, decoded = pcall(cjson.decode, raw)
+    if ok and decoded then
+        existing_loggedin = tonumber(decoded["num_views_loggedin"]) or 0
+        existing_all = tonumber(decoded["num_views_all"]) or 0
+    end
+end
+
+local merged = cjson.encode({
+    num_views_loggedin = math.max(existing_loggedin, incoming_loggedin),
+    num_views_all = math.max(existing_all, incoming_all),
+})
+
+if ttl > 0 then
+    redis.call("SET", key, merged, "EX", ttl)
+else
+    redis.call("SET", key, merged)
+end
+
+return 1
+"""
+
 
 class KVFeedRepository:
     def __init__(self, client, settings):
@@ -347,33 +379,29 @@ class KVFeedRepository:
             }
         return result
 
-    async def cache_video_view_counts(
-        self,
-        view_counts: dict[str, dict[str, int]],
-        ttl_sec: Optional[int] = None,
-    ) -> int:
+    async def upsert_video_view_counts(self, view_counts: dict[str, dict[str, int]]) -> int:
         if not view_counts:
             return 0
 
-        ttl = ttl_sec or self._settings.feed_recsys_view_count_ttl_sec
-        pipe = self._client.pipeline()
+        ttl = self._settings.feed_recsys_view_count_ttl_sec
         count = 0
         for video_id, payload in view_counts.items():
             if not video_id:
                 continue
-            pipe.set(
+            await self._client.execute_command(
+                "EVAL",
+                _UPSERT_VIDEO_VIEW_COUNTS_SCRIPT,
+                1,
                 video_view_count_key(self._settings, video_id),
-                json.dumps(
-                    {
-                        "num_views_loggedin": int(payload.get("num_views_loggedin") or 0),
-                        "num_views_all": int(payload.get("num_views_all") or 0),
-                    }
-                ),
-                ex=ttl,
+                int(payload.get("num_views_loggedin") or 0),
+                int(payload.get("num_views_all") or 0),
+                ttl,
             )
             count += 1
-        await pipe.execute()
         return count
+
+    async def cache_video_view_counts(self, view_counts: dict[str, dict[str, int]]) -> int:
+        return await self.upsert_video_view_counts(view_counts)
 
     async def _get_pool(
         self,

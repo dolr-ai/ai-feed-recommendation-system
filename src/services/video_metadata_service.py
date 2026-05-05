@@ -191,5 +191,5 @@ class VideoMetadataService:
             return cached_counts
 
         if fresh_counts:
-            await self._kv_feed_repository.cache_video_view_counts(fresh_counts)
+            await self._kv_feed_repository.upsert_video_view_counts(fresh_counts)
         return {**cached_counts, **fresh_counts}

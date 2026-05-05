@@ -22,8 +22,6 @@ class StubKVVideoMetadataRepository:
 
 class StubSettings:
     feed_recsys_popularity_buckets = []
-    feed_recsys_view_count_prewarm_enabled = True
-    feed_recsys_view_count_prewarm_batch_size = 2
     feed_recsys_pool_ttl_sec = 3600
     feed_recsys_following_pool_ttl_sec = 10800
     feed_recsys_following_fetch_limit = 1000
@@ -42,7 +40,7 @@ class StubKVFeedRepository:
         self.cached_reads.append(video_ids)
         return {"video-1": {"num_views_loggedin": 1, "num_views_all": 2}}
 
-    async def cache_video_view_counts(self, view_counts):
+    async def upsert_video_view_counts(self, view_counts):
         self.cached_writes.append(view_counts)
         return len(view_counts)
 
@@ -58,24 +56,18 @@ class StubKVFeedRepository:
         return list(self.tracked_following_users)
 
 
-class StubOffchainRewardsClient:
-    def __init__(self):
-        self.calls = []
-
-    async def get_bulk_video_stats(self, video_ids):
-        self.calls.append(video_ids)
-        return {
-            video_id: {"num_views_loggedin": index + 10, "num_views_all": index + 100}
-            for index, video_id in enumerate(video_ids)
-        }
-
-
 class StubClickHouseFeedRepository:
     async def get_global_popular_videos(self):
         return [
             {"video_id": "video-1"},
             {"video_id": "video-2"},
             {"video_id": "video-4"},
+        ]
+
+    async def get_fresh_videos(self):
+        return [
+            {"bucket": "l1d", "video_id": "video-1"},
+            {"bucket": "l7d", "video_id": "video-4"},
         ]
 
     async def get_following_video_candidates(self, user_id, num_videos=1000):
@@ -92,7 +84,6 @@ async def test_filter_video_ids_with_metadata_uses_clickhouse_eligibility_only()
         kv_video_metadata_repository=kv_video_metadata_repository,
         kv_feed_repository=None,
         chat_api_client=None,
-        offchain_rewards_client=None,
         settings=StubSettings(),
     )
 
@@ -109,47 +100,15 @@ async def test_filter_video_ids_with_metadata_uses_clickhouse_eligibility_only()
     ]
 
 
-async def test_prewarm_video_view_count_cache_reads_cache_and_fetches_only_misses():
+async def test_sync_global_popularity_pools_does_not_prewarm_view_count_cache():
     kv_feed_repository = StubKVFeedRepository()
     kv_video_metadata_repository = StubKVVideoMetadataRepository()
-    offchain_rewards_client = StubOffchainRewardsClient()
-    service = FeedSyncService(
-        clickhouse_feed_repository=None,
-        clickhouse_video_metadata_repository=StubClickHouseVideoMetadataRepository(),
-        kv_video_metadata_repository=kv_video_metadata_repository,
-        kv_feed_repository=kv_feed_repository,
-        chat_api_client=None,
-        offchain_rewards_client=offchain_rewards_client,
-        settings=StubSettings(),
-    )
-
-    await service._prewarm_video_view_count_cache(
-        ["video-1", "video-2", "video-3", "video-2", ""],
-        source="popularity",
-    )
-
-    assert kv_feed_repository.cached_reads == [["video-1", "video-2", "video-3"]]
-    assert offchain_rewards_client.calls == [["video-2", "video-3"]]
-    assert kv_feed_repository.cached_writes == [
-        {
-            "video-2": {"num_views_loggedin": 10, "num_views_all": 100},
-            "video-3": {"num_views_loggedin": 11, "num_views_all": 101},
-        }
-    ]
-
-
-async def test_sync_global_popularity_pools_prewarms_view_count_cache_after_pool_write():
-    kv_feed_repository = StubKVFeedRepository()
-    kv_video_metadata_repository = StubKVVideoMetadataRepository()
-    offchain_rewards_client = StubOffchainRewardsClient()
-
     service = FeedSyncService(
         clickhouse_feed_repository=StubClickHouseFeedRepository(),
         clickhouse_video_metadata_repository=StubClickHouseVideoMetadataRepository(),
         kv_video_metadata_repository=kv_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
         chat_api_client=None,
-        offchain_rewards_client=offchain_rewards_client,
         settings=StubSettings(),
     )
     service._bucket_popular_video_ids = lambda rows: {
@@ -168,13 +127,31 @@ async def test_sync_global_popularity_pools_prewarms_view_count_cache_after_pool
         {"video-1": {"post_id": "11", "publisher_user_id": "publisher-1"}},
         {"video-4": {"post_id": "44", "publisher_user_id": "publisher-4"}},
     ]
-    assert kv_feed_repository.cached_reads == [["video-1", "video-4"]]
-    assert offchain_rewards_client.calls == [["video-4"]]
-    assert kv_feed_repository.cached_writes == [
-        {
-            "video-4": {"num_views_loggedin": 10, "num_views_all": 100},
-        }
+    assert kv_feed_repository.cached_reads == []
+    assert kv_feed_repository.cached_writes == []
+
+
+async def test_sync_fresh_pools_does_not_depend_on_view_count_population():
+    kv_feed_repository = StubKVFeedRepository()
+    kv_video_metadata_repository = StubKVVideoMetadataRepository()
+    service = FeedSyncService(
+        clickhouse_feed_repository=StubClickHouseFeedRepository(),
+        clickhouse_video_metadata_repository=StubClickHouseVideoMetadataRepository(),
+        kv_video_metadata_repository=kv_video_metadata_repository,
+        kv_feed_repository=kv_feed_repository,
+        chat_api_client=None,
+        settings=StubSettings(),
+    )
+
+    inserted = await service.sync_fresh_pools()
+
+    assert inserted == {"l1d": 1, "l7d": 1}
+    assert kv_feed_repository.replaced_global_pools == [
+        ("fresh:l1d", ["video-1"], 3600),
+        ("fresh:l7d", ["video-4"], 3600),
     ]
+    assert kv_feed_repository.cached_reads == []
+    assert kv_feed_repository.cached_writes == []
 
 
 async def test_sync_tracked_following_pools_refreshes_registered_users_only():
@@ -187,7 +164,6 @@ async def test_sync_tracked_following_pools_refreshes_registered_users_only():
         kv_video_metadata_repository=kv_video_metadata_repository,
         kv_feed_repository=kv_feed_repository,
         chat_api_client=None,
-        offchain_rewards_client=None,
         settings=StubSettings(),
     )
 

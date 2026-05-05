@@ -1,3 +1,5 @@
+import json
+
 import src.repository.kv_feed_repository as kv_feed_repository_module
 from src.core.settings import Settings
 from src.repository.kv_feed_repository import KVFeedRepository
@@ -66,7 +68,7 @@ class FakeClient:
         self.exists_value = 0
         self.smismember_result = []
         self.get_value = None
-        self.mget_values = []
+        self.mget_values = None
         self.ttl_value = -2
         self.hgetall_result = {}
         self.zrangebyscore_result = []
@@ -77,7 +79,9 @@ class FakeClient:
         self.delete_calls = []
         self.exists_calls = []
         self.smismember_calls = []
+        self.mget_calls = []
         self.execute_command_calls = []
+        self.store = {}
 
     def pipeline(self):
         results = self.pipeline_results.pop(0) if self.pipeline_results else []
@@ -94,9 +98,14 @@ class FakeClient:
         return self.smismember_result
 
     async def get(self, key):
-        return self.get_value
+        if self.get_value is not None:
+            return self.get_value
+        return self.store.get(key)
 
     async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.store:
+            return False
+        self.store[key] = value
         self.set_calls.append((key, value, ex, nx))
         return True
 
@@ -125,12 +134,31 @@ class FakeClient:
         return len(keys)
 
     async def mget(self, keys):
-        self.mget_calls = getattr(self, "mget_calls", [])
         self.mget_calls.append(keys)
-        return self.mget_values
+        if self.mget_values is not None:
+            return self.mget_values
+        return [self.store.get(key) for key in keys]
 
     async def execute_command(self, *args):
         self.execute_command_calls.append(args)
+        if args and args[0] == "EVAL":
+            key = args[3]
+            incoming_loggedin = int(args[4])
+            incoming_all = int(args[5])
+            existing = json.loads(self.store.get(key) or "{}")
+            merged = {
+                "num_views_loggedin": max(
+                    int(existing.get("num_views_loggedin") or 0),
+                    incoming_loggedin,
+                ),
+                "num_views_all": max(
+                    int(existing.get("num_views_all") or 0),
+                    incoming_all,
+                ),
+            }
+            self.store[key] = json.dumps(merged)
+            self.expire_calls.append((key, int(args[6])))
+            return 1
         return []
 
 
@@ -279,32 +307,69 @@ async def test_get_cached_video_view_counts_reads_json_payloads():
     ]]
 
 
-async def test_cache_video_view_counts_sets_ttl_payloads():
+async def test_upsert_video_view_counts_uses_shared_ttl_and_payloads():
     client = FakeClient()
     settings = build_settings(storage_namespace="staging")
     repo = KVFeedRepository(client, settings)
 
-    count = await repo.cache_video_view_counts(
+    count = await repo.upsert_video_view_counts(
         {
             "video-1": {"num_views_loggedin": 3, "num_views_all": 8},
             "video-2": {"num_views_loggedin": 0, "num_views_all": 1},
-        },
-        ttl_sec=120,
+        }
     )
 
     assert count == 2
-    pipe = client.pipelines[0]
-    assert pipe.ops == [
-        (
-            "set",
-            video_view_count_key(settings, "video-1"),
-            '{"num_views_loggedin": 3, "num_views_all": 8}',
-            120,
-        ),
-        (
-            "set",
-            video_view_count_key(settings, "video-2"),
-            '{"num_views_loggedin": 0, "num_views_all": 1}',
-            120,
-        ),
+    assert [call[0] for call in client.execute_command_calls] == ["EVAL", "EVAL"]
+    assert client.execute_command_calls[0][3:] == (
+        video_view_count_key(settings, "video-1"),
+        3,
+        8,
+        settings.feed_recsys_view_count_ttl_sec,
+    )
+    assert client.execute_command_calls[1][3:] == (
+        video_view_count_key(settings, "video-2"),
+        0,
+        1,
+        settings.feed_recsys_view_count_ttl_sec,
+    )
+    assert client.store == {
+        video_view_count_key(settings, "video-1"): '{"num_views_loggedin": 3, "num_views_all": 8}',
+        video_view_count_key(settings, "video-2"): '{"num_views_loggedin": 0, "num_views_all": 1}',
+    }
+
+
+async def test_upsert_video_view_counts_max_merges_against_existing_cache():
+    client = FakeClient()
+    settings = build_settings(storage_namespace="staging")
+    key = video_view_count_key(settings, "video-1")
+    client.store[key] = '{"num_views_loggedin": 7, "num_views_all": 5}'
+    repo = KVFeedRepository(client, settings)
+
+    count = await repo.upsert_video_view_counts(
+        {"video-1": {"num_views_loggedin": 3, "num_views_all": 9}}
+    )
+
+    assert count == 1
+    assert client.store[key] == '{"num_views_loggedin": 7, "num_views_all": 9}'
+    assert client.expire_calls == [
+        (key, settings.feed_recsys_view_count_ttl_sec),
+    ]
+
+
+async def test_upsert_video_view_counts_does_not_lower_stale_payloads():
+    client = FakeClient()
+    settings = build_settings(storage_namespace="staging")
+    key = video_view_count_key(settings, "video-1")
+    client.store[key] = '{"num_views_loggedin": 11, "num_views_all": 22}'
+    repo = KVFeedRepository(client, settings)
+
+    count = await repo.upsert_video_view_counts(
+        {"video-1": {"num_views_loggedin": 9, "num_views_all": 20}}
+    )
+
+    assert count == 1
+    assert client.store[key] == '{"num_views_loggedin": 11, "num_views_all": 22}'
+    assert client.expire_calls == [
+        (key, settings.feed_recsys_view_count_ttl_sec),
     ]
