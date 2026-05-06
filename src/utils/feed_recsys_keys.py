@@ -16,6 +16,10 @@ def _global_slot() -> str:
     return "{GLOBAL}"
 
 
+def _publisher_profile_slot() -> str:
+    return "{PUBLISHER_PROFILE}"
+
+
 def user_pool_key(settings: Settings, user_id: str, pool_name: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_user_slot(user_id)}:pool:{pool_name}"
 
@@ -58,6 +62,31 @@ def job_lock_key(settings: Settings, job_name: str) -> str:
 
 def video_view_count_key(settings: Settings, video_id: str) -> str:
     return f"{feed_recsys_prefix(settings)}:{_global_slot()}:view_counts:{video_id}"
+
+
+def publisher_profile_key(settings: Settings, publisher_user_id: str) -> str:
+    return (
+        f"{feed_recsys_prefix(settings)}:{_publisher_profile_slot()}:"
+        f"publisher:{publisher_user_id}"
+    )
+
+
+def publisher_profile_refresh_queue_key(settings: Settings) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_publisher_profile_slot()}:queue:refresh"
+
+
+def publisher_profile_warmup_queue_key(settings: Settings) -> str:
+    return f"{feed_recsys_prefix(settings)}:{_publisher_profile_slot()}:queue:warmup"
+
+
+def publisher_profile_refresh_lock_key(
+    settings: Settings,
+    publisher_user_id: str,
+) -> str:
+    return (
+        f"{feed_recsys_prefix(settings)}:{_publisher_profile_slot()}:"
+        f"refresh:lock:{publisher_user_id}"
+    )
 
 
 def video_metadata_key(video_id: str) -> str:

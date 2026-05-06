@@ -3,11 +3,14 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Optional
 
+MAX_FOLLOW_LOOKUP_CHUNK_SIZE = 100
+
 
 class ClickHouseFeedRepository:
     def __init__(self, client, settings):
         self._client = client
         self._settings = settings
+        self._follow_lookup_supports_updated_at: bool | None = None
 
     async def get_global_popular_videos(
         self,
@@ -160,6 +163,65 @@ class ClickHouseFeedRepository:
             self._limit_parameters(limit),
         )
 
+    async def get_recent_active_publisher_user_ids(
+        self,
+        limit: Optional[int] = None,
+        lookback_days: int = 90,
+    ) -> list[str]:
+        query = f"""
+        WITH
+            {self._rejected_and_excluded_ctes()},
+            {self._valid_videos_cte(include_approval_source=True)},
+            publisher_activity AS (
+                SELECT
+                    aug.publisher_user_id AS publisher_user_id,
+                    aug.video_id AS video_id,
+                    aug.upload_timestamp AS source_timestamp
+                FROM {self._table("ai_ugc")} AS aug FINAL
+                WHERE aug.upload_timestamp IS NOT NULL
+                  AND notEmpty(aug.publisher_user_id)
+                  AND aug.upload_timestamp >= now() - INTERVAL %(lookback_days)s DAY
+
+                UNION ALL
+
+                SELECT
+                    buc.publisher_user_id AS publisher_user_id,
+                    buc.video_id AS video_id,
+                    buc.timestamp AS source_timestamp
+                FROM {self._table("bot_uploaded_content")} AS buc FINAL
+                WHERE buc.timestamp IS NOT NULL
+                  AND notEmpty(buc.publisher_user_id)
+                  AND buc.timestamp >= now() - INTERVAL %(lookback_days)s DAY
+
+                UNION ALL
+
+                SELECT
+                    uca.user_id AS publisher_user_id,
+                    uca.video_id AS video_id,
+                    uca.created_at AS source_timestamp
+                FROM {self._table("ugc_content_approval")} AS uca FINAL
+                WHERE uca.is_approved = 1
+                  AND uca.created_at IS NOT NULL
+                  AND notEmpty(uca.user_id)
+                  AND uca.created_at >= now() - INTERVAL %(lookback_days)s DAY
+            )
+        SELECT
+            pa.publisher_user_id
+        FROM publisher_activity pa
+        INNER JOIN valid_videos vv
+            ON pa.video_id = vv.video_id
+        GROUP BY pa.publisher_user_id
+        ORDER BY max(pa.source_timestamp) DESC, pa.publisher_user_id
+        {self._limit_clause(limit)}
+        """
+        params = {"lookback_days": lookback_days, **self._limit_parameters(limit)}
+        rows = await self._client.fetch_all(dedent(query).strip(), params)
+        return [
+            str(row.get("publisher_user_id") or "").strip()
+            for row in rows
+            if str(row.get("publisher_user_id") or "").strip()
+        ]
+
     async def get_following_video_candidates(
         self,
         user_id: str,
@@ -276,8 +338,63 @@ class ClickHouseFeedRepository:
             if row.get("video_id")
         ]
 
+    async def get_following_status_batch(
+        self,
+        viewer_user_id: str,
+        publisher_ids: list[str],
+    ) -> dict[str, bool]:
+        unique_publisher_ids = tuple(
+            dict.fromkeys(publisher_id for publisher_id in publisher_ids if publisher_id)
+        )
+        result = {publisher_id: False for publisher_id in unique_publisher_ids}
+        if not viewer_user_id or not unique_publisher_ids:
+            return result
+
+        chunk_size = min(
+            MAX_FOLLOW_LOOKUP_CHUNK_SIZE,
+            max(1, self._settings.feed_recsys_follow_lookup_chunk_size),
+        )
+        for index in range(0, len(unique_publisher_ids), chunk_size):
+            batch = unique_publisher_ids[index:index + chunk_size]
+            rows = await self._get_following_status_rows(viewer_user_id, batch)
+            for row in rows:
+                following_id = str(row.get("following_id") or "").strip()
+                if not following_id:
+                    continue
+                result[following_id] = bool(row.get("is_following"))
+        return result
+
     def _table(self, name: str) -> str:
         return f"{self._settings.clickhouse_database}.{name}"
+
+    async def _get_following_status_rows(
+        self,
+        viewer_user_id: str,
+        publisher_ids: tuple[str, ...],
+    ) -> list[dict]:
+        if self._follow_lookup_supports_updated_at is not False:
+            try:
+                rows = await self._client.fetch_all(
+                    self._following_status_query(use_updated_at=True),
+                    {
+                        "viewer_user_id": viewer_user_id,
+                        "publisher_ids": publisher_ids,
+                    },
+                )
+                self._follow_lookup_supports_updated_at = True
+                return rows
+            except Exception as exc:
+                if not self._is_missing_updated_at_error(exc):
+                    raise
+                self._follow_lookup_supports_updated_at = False
+
+        return await self._client.fetch_all(
+            self._following_status_query(use_updated_at=False),
+            {
+                "viewer_user_id": viewer_user_id,
+                "publisher_ids": publisher_ids,
+            },
+        )
 
     def _rejected_and_excluded_ctes(self) -> str:
         return dedent(
@@ -337,3 +454,30 @@ class ClickHouseFeedRepository:
         if limit is None:
             return {}
         return {"limit": limit}
+
+    def _following_status_query(self, use_updated_at: bool) -> str:
+        latest_state_expr = (
+            "toUInt8(argMax(active, tuple(last_updated_timestamp, _updated_at)))"
+            if use_updated_at
+            else "toUInt8(argMax(active, last_updated_timestamp))"
+        )
+        query = f"""
+        SELECT
+            following_id,
+            {latest_state_expr} AS is_following
+        FROM {self._table("follower_graph")}
+        WHERE follower_id = %(viewer_user_id)s
+          AND following_id IN %(publisher_ids)s
+        GROUP BY following_id
+        """
+        return dedent(query).strip()
+
+    @staticmethod
+    def _is_missing_updated_at_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "_updated_at" in message and (
+            "unknown" in message
+            or "missing" in message
+            or "identifier" in message
+            or "column" in message
+        )

@@ -76,8 +76,18 @@ class StubClickHouseFeedRepository:
         return []
 
 
+class StubPublisherProfileEnrichmentService:
+    def __init__(self):
+        self.warmup_calls = []
+
+    async def queue_warmup_publishers(self, publisher_user_ids):
+        self.warmup_calls.append(list(publisher_user_ids))
+        return len(publisher_user_ids)
+
+
 async def test_filter_video_ids_with_metadata_uses_clickhouse_eligibility_only():
     kv_video_metadata_repository = StubKVVideoMetadataRepository()
+    publisher_profile_enrichment_service = StubPublisherProfileEnrichmentService()
     service = FeedSyncService(
         clickhouse_feed_repository=None,
         clickhouse_video_metadata_repository=StubClickHouseVideoMetadataRepository(),
@@ -85,6 +95,7 @@ async def test_filter_video_ids_with_metadata_uses_clickhouse_eligibility_only()
         kv_feed_repository=None,
         chat_api_client=None,
         settings=StubSettings(),
+        publisher_profile_enrichment_service=publisher_profile_enrichment_service,
     )
 
     result = await service._filter_video_ids_with_metadata(
@@ -97,6 +108,9 @@ async def test_filter_video_ids_with_metadata_uses_clickhouse_eligibility_only()
             "video-1": {"post_id": "11", "publisher_user_id": "publisher-1"},
             "video-4": {"post_id": "44", "publisher_user_id": "publisher-4"},
         }
+    ]
+    assert publisher_profile_enrichment_service.warmup_calls == [
+        ["publisher-1", "publisher-4"]
     ]
 
 

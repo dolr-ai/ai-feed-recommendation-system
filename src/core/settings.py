@@ -99,11 +99,32 @@ class Settings(BaseSettings):
     feed_recsys_bloom_expansion: int = 4
     feed_recsys_percentile_pointer_ttl_sec: int = 24 * 60 * 60
     feed_recsys_view_count_ttl_sec: int = 12 * 60 * 60
+    feed_recsys_publisher_username_stale_after_sec: int = 6 * 60 * 60
+    feed_recsys_publisher_profile_stale_after_sec: int = 60 * 60
+    feed_recsys_publisher_profile_hard_ttl_sec: int = 7 * 24 * 60 * 60
+    feed_recsys_publisher_profile_ttl_jitter_sec: int = 60 * 60
+    feed_recsys_publisher_profile_refresh_interval_sec: int = 300
+    feed_recsys_publisher_profile_warmup_interval_sec: int = 900
+    feed_recsys_publisher_profile_refresh_batch_size: int = 100
+    feed_recsys_publisher_profile_warmup_batch_size: int = 100
+    feed_recsys_publisher_profile_backfill_batch_size: int = 100
+    feed_recsys_publisher_profile_upstream_chunk_size: int = 100
+    feed_recsys_publisher_profile_backfill_lookback_days: int = 90
+    feed_recsys_publisher_profile_backfill_lock_ttl_sec: int = 1800
+    feed_recsys_publisher_profile_refresh_lock_ttl_sec: int = 120
+    feed_recsys_follow_lookup_chunk_size: int = 100
+    feed_recsys_follow_lookup_max_concurrency: int = 4
 
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
     offchain_agent_base_url: str = "https://offchain.yral.com"
     offchain_agent_timeout: int = 15
+    metadata_service_base_url: str = "https://metadata.yral.com/"
+    metadata_service_auth_token: str = ""
+    feed_recsys_request_metadata_timeout_sec: float = 2.0
+    feed_recsys_background_metadata_timeout_sec: float = 2.0
+    feed_recsys_background_metadata_max_retries: int = 1
+    feed_recsys_background_metadata_retry_backoff_sec: float = 0.5
 
     ic_gateway_base_url: str = Field(...)
     profile_canister_id: str = Field(...)
@@ -113,6 +134,8 @@ class Settings(BaseSettings):
     canister_http_timeout_sec: float = 15.0
     canister_query_retries: int = 2
     canister_retry_backoff_sec: float = 0.5
+    feed_recsys_request_ic_profile_timeout_sec: float = 1.0
+    feed_recsys_request_ic_profile_retries: int = 0
 
     engagement_w_conversation: float = 0.45
     engagement_w_messages: float = 0.30

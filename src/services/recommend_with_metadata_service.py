@@ -7,9 +7,15 @@ from src.services.logger_service import LoggerService
 
 
 class RecommendWithMetadataService:
-    def __init__(self, feed_pool_service, video_metadata_service):
+    def __init__(
+        self,
+        feed_pool_service,
+        video_metadata_service,
+        publisher_profile_enrichment_service,
+    ):
         self._feed_pool_service = feed_pool_service
         self._video_metadata_service = video_metadata_service
+        self._publisher_profile_enrichment_service = publisher_profile_enrichment_service
         self._log = LoggerService().get("feed_recsys_request")
 
     async def recommend_with_metadata(
@@ -25,6 +31,10 @@ class RecommendWithMetadataService:
                 rec_type,
             )
             videos = await self._video_metadata_service.build_video_rows(video_ids)
+            videos = await self._publisher_profile_enrichment_service.enrich_rows(
+                user_id,
+                videos,
+            )
             if not videos:
                 self._log.warning(
                     "Feed recsys request returned no videos",

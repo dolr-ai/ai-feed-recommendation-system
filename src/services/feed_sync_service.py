@@ -16,6 +16,7 @@ class FeedSyncService:
         kv_feed_repository,
         chat_api_client,
         settings,
+        publisher_profile_enrichment_service=None,
     ):
         self._clickhouse_feed_repository = clickhouse_feed_repository
         self._clickhouse_video_metadata_repository = clickhouse_video_metadata_repository
@@ -23,6 +24,7 @@ class FeedSyncService:
         self._kv_feed_repository = kv_feed_repository
         self._chat_api_client = chat_api_client
         self._settings = settings
+        self._publisher_profile_enrichment_service = publisher_profile_enrichment_service
         self._log = LoggerService().get("feed_recsys_sync")
 
     async def sync_global_popularity_pools(self) -> dict[str, int]:
@@ -196,6 +198,14 @@ class FeedSyncService:
             if eligible_metadata and self._kv_video_metadata_repository is not None:
                 await self._kv_video_metadata_repository.cache_video_metadata_batch(
                     eligible_metadata
+                )
+            if eligible_metadata and self._publisher_profile_enrichment_service is not None:
+                await self._publisher_profile_enrichment_service.queue_warmup_publishers(
+                    [
+                        row.get("publisher_user_id")
+                        for row in eligible_metadata.values()
+                        if row.get("publisher_user_id")
+                    ]
                 )
             result.extend(eligible_metadata.keys())
         return result
