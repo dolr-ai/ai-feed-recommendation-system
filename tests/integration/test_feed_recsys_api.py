@@ -250,9 +250,9 @@ async def test_feed_recsys_api_returns_metadata_and_ai_influencer_flag():
         assert payload["videos"][0]["from_ai_influencer"] is True
         assert payload["videos"][0]["num_views_loggedin"] == 0
         assert payload["videos"][0]["is_following"] is False
-        assert payload["videos"][0]["username"] == ""
+        assert "username" not in payload["videos"][0]
         assert payload["videos"][0]["is_pro_user"] is False
-        assert payload["videos"][0]["profile_image_url"] == ""
+        assert "profile_image_url" not in payload["videos"][0]
 
 
 @pytest.mark.asyncio

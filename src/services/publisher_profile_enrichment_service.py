@@ -84,9 +84,9 @@ class PublisherProfileEnrichmentService:
         for row in rows:
             profile = resolved_profiles.get(row.publisher_user_id, {})
             row.is_following = following_status.get(row.publisher_user_id, False)
-            row.username = str(profile.get("username") or "")
+            row.username = self._optional_string(profile.get("username"))
             row.is_pro_user = bool(profile.get("is_pro_user") or False)
-            row.profile_image_url = str(profile.get("profile_image_url") or "")
+            row.profile_image_url = self._optional_string(profile.get("profile_image_url"))
 
         return rows
 
@@ -521,6 +521,11 @@ class PublisherProfileEnrichmentService:
             or profile.get("username_fetched_at")
             or profile.get("profile_fetched_at")
         )
+
+    @staticmethod
+    def _optional_string(value) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
 
     @staticmethod
     def _dedupe_publisher_ids(publisher_user_ids) -> list[str]:

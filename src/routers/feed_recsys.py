@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/v1", tags=["feed-recsys"])
 @router.get(
     "/recommend-with-metadata/{user_id}",
     response_model=FeedRecommendationWithMetadataResponse,
+    response_model_exclude_none=True,
 )
 async def get_recommend_with_metadata(
     user_id: str,
