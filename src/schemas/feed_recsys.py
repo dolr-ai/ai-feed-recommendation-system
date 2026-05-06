@@ -19,6 +19,10 @@ class FeedVideoMetadata(BaseModel):
     num_views_loggedin: int = Field(default=0)
     num_views_all: int = Field(default=0)
     from_ai_influencer: bool = Field(default=False)
+    is_following: bool = Field(default=False)
+    username: str = Field(default="")
+    is_pro_user: bool = Field(default=False)
+    profile_image_url: str = Field(default="")
 
 
 class FeedRecommendationWithMetadataResponse(BaseModel):

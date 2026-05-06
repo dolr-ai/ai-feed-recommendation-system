@@ -119,3 +119,17 @@ def test_configured_ic_client_retries_timeout(monkeypatch):
 
     assert result == b"ok"
     assert calls["count"] == 3
+
+
+def test_canister_client_bulk_profiles_raise_on_err_payload(settings):
+    client = CanisterClient(settings)
+
+    with pytest.raises(RuntimeError, match="bulk profile query returned Err"):
+        client._normalize_bulk_profiles([{"value": {"Err": "upstream unavailable"}}])
+
+
+def test_canister_client_bulk_profiles_raise_on_malformed_payload(settings):
+    client = CanisterClient(settings)
+
+    with pytest.raises(RuntimeError, match="unexpected bulk profile payload type"):
+        client._normalize_bulk_profiles([{"value": "bad-payload"}])

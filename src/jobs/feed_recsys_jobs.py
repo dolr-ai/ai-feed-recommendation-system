@@ -71,11 +71,42 @@ async def run_feed_recsys_ai_influencer_sync(kvrocks_client) -> None:
     )
 
 
+async def run_feed_recsys_publisher_profile_refresh_sync(kvrocks_client) -> None:
+    await _run_locked_job(
+        kvrocks_client,
+        "publisher_profile_refresh_sync",
+        get_settings().feed_recsys_publisher_profile_refresh_interval_sec,
+        "refresh_queued_profiles",
+        runtime_key="publisher_profile_enrichment_service",
+    )
+
+
+async def run_feed_recsys_publisher_profile_warmup_sync(kvrocks_client) -> None:
+    await _run_locked_job(
+        kvrocks_client,
+        "publisher_profile_warmup_sync",
+        get_settings().feed_recsys_publisher_profile_warmup_interval_sec,
+        "warmup_publisher_profiles",
+        runtime_key="publisher_profile_enrichment_service",
+    )
+
+
+async def run_feed_recsys_publisher_profile_backfill_sync(kvrocks_client) -> None:
+    await _run_locked_job(
+        kvrocks_client,
+        "publisher_profile_backfill_sync",
+        get_settings().feed_recsys_publisher_profile_backfill_lock_ttl_sec,
+        "backfill_recent_publishers",
+        runtime_key="publisher_profile_enrichment_service",
+    )
+
+
 async def _run_locked_job(
     kvrocks_client,
     job_name: str,
     ttl: int,
     service_method_name: str,
+    runtime_key: str = "feed_sync_service",
 ) -> None:
     settings = get_settings()
     lock_key = job_lock_key(settings, job_name)
@@ -93,7 +124,7 @@ async def _run_locked_job(
             "Feed recsys job started",
             extra={"job": job_name},
         )
-        service_method = getattr(runtime["feed_sync_service"], service_method_name)
+        service_method = getattr(runtime[runtime_key], service_method_name)
         result = await service_method()
         log.info(
             "Feed recsys job completed",

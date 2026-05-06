@@ -23,8 +23,29 @@ def candid_hash(name: str) -> str:
 
 
 class CanisterClient(BaseApiClient):
-    def __init__(self, settings):
+    def __init__(
+        self,
+        settings,
+        http_timeout_sec: Optional[float] = None,
+        query_retries: Optional[int] = None,
+        retry_backoff_sec: Optional[float] = None,
+    ):
         self._settings = settings
+        self._http_timeout_sec = (
+            settings.canister_http_timeout_sec
+            if http_timeout_sec is None
+            else http_timeout_sec
+        )
+        self._query_retries = (
+            settings.canister_query_retries
+            if query_retries is None
+            else query_retries
+        )
+        self._retry_backoff_sec = (
+            settings.canister_retry_backoff_sec
+            if retry_backoff_sec is None
+            else retry_backoff_sec
+        )
         self._log = LoggerService().get("canister_client")
         self._limiter = AsyncRateLimiter(settings.canister_rps)
         self._semaphore = asyncio.Semaphore(settings.canister_concurrency)
@@ -44,6 +65,11 @@ class CanisterClient(BaseApiClient):
         self._view_stats_key = candid_hash("view_stats")
         self._total_views_key = candid_hash("total_view_count")
         self._avg_watch_key = candid_hash("average_watch_percentage")
+        self._principal_id_key = candid_hash("principal_id")
+        self._profile_picture_key = candid_hash("profile_picture")
+        self._subscription_plan_key = candid_hash("subscription_plan")
+        self._url_key = candid_hash("url")
+        self._pro_key = candid_hash("Pro")
         self._stats = Counter()
 
     async def get_profile(self, principal: str) -> dict:
@@ -175,6 +201,30 @@ class CanisterClient(BaseApiClient):
 
         return await asyncio.gather(*[_enrich_one(influencer) for influencer in influencers])
 
+    async def get_users_profile_details(self, principals: list[str]) -> dict[str, dict]:
+        unique_principals = list(
+            dict.fromkeys(str(principal or "").strip() for principal in principals if principal)
+        )
+        if not unique_principals:
+            return {}
+
+        await self._ensure_agent()
+        await self._limiter.acquire()
+        raw = await asyncio.to_thread(
+            self._agent.query_raw,
+            self._settings.profile_canister_id,
+            "get_users_profile_details",
+            self._encode(
+                [
+                    {
+                        "type": self._types.Vec(self._types.Principal),
+                        "value": unique_principals,
+                    }
+                ]
+            ),
+        )
+        return self._normalize_bulk_profiles(raw)
+
     def get_stats(self) -> dict[str, int]:
         return dict(self._stats)
 
@@ -210,9 +260,9 @@ class CanisterClient(BaseApiClient):
             Identity(),
             _ConfiguredIcClient(
                 url=self._settings.ic_gateway_base_url,
-                timeout_sec=self._settings.canister_http_timeout_sec,
-                retries=self._settings.canister_query_retries,
-                retry_backoff_sec=self._settings.canister_retry_backoff_sec,
+                timeout_sec=self._http_timeout_sec,
+                retries=self._query_retries,
+                retry_backoff_sec=self._retry_backoff_sec,
             ),
         )
 
@@ -308,6 +358,83 @@ class CanisterClient(BaseApiClient):
         if isinstance(payload, dict) and "value" in payload:
             return payload["value"]
         return payload
+
+    def _normalize_bulk_profiles(self, raw: Any) -> dict[str, dict]:
+        if not raw:
+            raise RuntimeError("empty bulk profile response")
+
+        payload = self._unwrap_value(raw[0])
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "unexpected bulk profile payload type: "
+                f"{type(payload).__name__}"
+            )
+
+        ok_payload = payload.get("Ok", payload.get(self._ok_key))
+        if ok_payload is None:
+            error = payload.get("Err", payload.get(self._err_key, "unknown bulk profile error"))
+            raise RuntimeError(f"bulk profile query returned Err: {error}")
+
+        if not isinstance(ok_payload, list):
+            raise RuntimeError(
+                "unexpected bulk profile Ok payload type: "
+                f"{type(ok_payload).__name__}"
+            )
+
+        profiles: dict[str, dict] = {}
+        for item in ok_payload:
+            row = self._unwrap_value(item)
+            if not isinstance(row, dict):
+                continue
+            principal = self._stringify_principal(
+                row.get("principal_id", row.get(self._principal_id_key))
+            )
+            if not principal:
+                continue
+            profiles[principal] = {
+                "profile_image_url": self._extract_profile_picture_url(
+                    row.get("profile_picture", row.get(self._profile_picture_key))
+                ),
+                "is_pro_user": self._extract_is_pro_user(
+                    row.get("subscription_plan", row.get(self._subscription_plan_key))
+                ),
+            }
+        return profiles
+
+    @classmethod
+    def _extract_profile_picture_url(cls, profile_picture: Any) -> str:
+        payload = cls._extract_optional(profile_picture)
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("url", payload.get(candid_hash("url"), "")) or "").strip()
+
+    def _extract_is_pro_user(self, subscription_plan: Any) -> bool:
+        payload = self._unwrap_value(subscription_plan)
+        if isinstance(payload, str):
+            return payload == "Pro"
+        if isinstance(payload, dict):
+            return "Pro" in payload or self._pro_key in payload
+        return False
+
+    @classmethod
+    def _extract_optional(cls, value: Any) -> Any:
+        payload = cls._unwrap_value(value)
+        if payload is None:
+            return None
+        if isinstance(payload, list):
+            if not payload:
+                return None
+            return cls._unwrap_value(payload[0])
+        if isinstance(payload, tuple):
+            if not payload:
+                return None
+            return cls._unwrap_value(payload[0])
+        return payload
+
+    @classmethod
+    def _stringify_principal(cls, value: Any) -> str:
+        payload = cls._unwrap_value(value)
+        return str(payload or "").strip()
 
     @staticmethod
     def _is_timeout_error(exc: Exception) -> bool:

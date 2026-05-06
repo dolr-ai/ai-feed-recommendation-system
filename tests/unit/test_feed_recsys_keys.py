@@ -5,6 +5,10 @@ from src.utils.feed_recsys_keys import (
     feed_recsys_prefix,
     global_pool_key,
     job_lock_key,
+    publisher_profile_key,
+    publisher_profile_refresh_lock_key,
+    publisher_profile_refresh_queue_key,
+    publisher_profile_warmup_queue_key,
     user_bloom_key,
     user_pool_key,
     user_popularity_pointer_key,
@@ -49,6 +53,18 @@ def test_feed_recsys_key_builders_use_storage_namespace():
     assert ai_influencer_ids_key(settings) == "staging:feed_recsys:{GLOBAL}:lookup:ai_influencer_ids"
     assert video_view_count_key(settings, "video-1") == (
         "staging:feed_recsys:{GLOBAL}:view_counts:video-1"
+    )
+    assert publisher_profile_key(settings, "publisher-1") == (
+        "staging:feed_recsys:{PUBLISHER_PROFILE}:publisher:publisher-1"
+    )
+    assert publisher_profile_refresh_queue_key(settings) == (
+        "staging:feed_recsys:{PUBLISHER_PROFILE}:queue:refresh"
+    )
+    assert publisher_profile_warmup_queue_key(settings) == (
+        "staging:feed_recsys:{PUBLISHER_PROFILE}:queue:warmup"
+    )
+    assert publisher_profile_refresh_lock_key(settings, "publisher-1") == (
+        "staging:feed_recsys:{PUBLISHER_PROFILE}:refresh:lock:publisher-1"
     )
     assert job_lock_key(settings, "freshness_sync") == (
         "staging:feed_recsys:{GLOBAL}:jobs:lock:freshness_sync"

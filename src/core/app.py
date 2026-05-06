@@ -15,6 +15,8 @@ from src.jobs.feed_recsys_jobs import (
     run_feed_recsys_freshness_sync,
     run_feed_recsys_following_sync,
     run_feed_recsys_popularity_sync,
+    run_feed_recsys_publisher_profile_refresh_sync,
+    run_feed_recsys_publisher_profile_warmup_sync,
     run_feed_recsys_ugc_sync,
 )
 from src.jobs.discovery_boost_job import run_discovery_boost_refresh
@@ -178,6 +180,28 @@ async def lifespan(app: FastAPI):
             next_run_time=scheduler_next_run_time(
                 settings.feed_recsys_job_run_on_startup,
                 delay_sec=stagger_sec * 6,
+            ),
+        )
+        scheduler.add_job(
+            run_feed_recsys_publisher_profile_refresh_sync,
+            "interval",
+            seconds=settings.feed_recsys_publisher_profile_refresh_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_publisher_profile_refresh_sync",
+            next_run_time=scheduler_next_run_time(
+                settings.feed_recsys_job_run_on_startup,
+                delay_sec=stagger_sec * 7,
+            ),
+        )
+        scheduler.add_job(
+            run_feed_recsys_publisher_profile_warmup_sync,
+            "interval",
+            seconds=settings.feed_recsys_publisher_profile_warmup_interval_sec,
+            args=[kvrocks],
+            id="feed_recsys_publisher_profile_warmup_sync",
+            next_run_time=scheduler_next_run_time(
+                settings.feed_recsys_job_run_on_startup,
+                delay_sec=stagger_sec * 8,
             ),
         )
         if not scheduler.running:
