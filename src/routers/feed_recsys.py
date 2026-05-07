@@ -9,7 +9,11 @@ from src.schemas.feed_recsys import (
 )
 from src.services.recommend_with_metadata_service import RecommendWithMetadataService
 
-router = APIRouter(prefix="/api/v1", tags=["feed-recsys"])
+FEED_RECSYS_ROUTER_PREFIX = "/api/v1"
+INTERNAL_VIEW_COUNTS_PATH = "/internal/feed-recsys/view-counts"
+INTERNAL_VIEW_COUNTS_FULL_PATH = f"{FEED_RECSYS_ROUTER_PREFIX}{INTERNAL_VIEW_COUNTS_PATH}"
+
+router = APIRouter(prefix=FEED_RECSYS_ROUTER_PREFIX, tags=["feed-recsys"])
 
 
 @router.get(
@@ -33,7 +37,7 @@ async def get_recommend_with_metadata(
 
 
 @router.post(
-    "/internal/feed-recsys/view-counts",
+    INTERNAL_VIEW_COUNTS_PATH,
     response_model=FeedViewCountPushResponse,
 )
 async def push_view_counts(

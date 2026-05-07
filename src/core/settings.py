@@ -114,6 +114,8 @@ class Settings(BaseSettings):
     feed_recsys_publisher_profile_refresh_lock_ttl_sec: int = 120
     feed_recsys_follow_lookup_chunk_size: int = 100
     feed_recsys_follow_lookup_max_concurrency: int = 4
+    internal_request_hmac_secret: str = ""
+    internal_request_max_skew_sec: int = 300
 
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
