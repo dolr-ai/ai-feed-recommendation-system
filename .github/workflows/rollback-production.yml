@@ -113,6 +113,7 @@ jobs:
             FEED_RECSYS_JOBS_ENABLED='${{ vars.PROD_FEED_RECSYS_JOBS_ENABLED || 'true' }}' \
             FEED_RECSYS_JOB_RUN_ON_STARTUP='${{ vars.PROD_FEED_RECSYS_JOB_RUN_ON_STARTUP || 'true' }}' \
             DISCOVERY_REFRESH_RUN_ON_STARTUP='${{ vars.PROD_DISCOVERY_REFRESH_RUN_ON_STARTUP || 'false' }}' \
+            INTERNAL_REQUEST_HMAC_SECRET='${{ secrets.PROD_INTERNAL_REQUEST_HMAC_SECRET }}' \
             SENTRY_ENABLED='${{ vars.PROD_SENTRY_ENABLED || 'true' }}' \
             SENTRY_DSN='${{ secrets.PROD_SENTRY_DSN }}' \
             SENTRY_ENVIRONMENT='${{ vars.PROD_SENTRY_ENVIRONMENT || 'production' }}' \
