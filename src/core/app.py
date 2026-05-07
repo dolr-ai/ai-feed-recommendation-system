@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from src.core.dependencies import build_runtime_objects, close_runtime_objects
+from src.core.internal_request_auth import add_internal_request_auth_middleware
 from src.core.observability import emit_sentry_startup_test_event, init_sentry
 from src.core.settings import get_settings
 from src.jobs.feed_recsys_jobs import (
@@ -21,11 +22,20 @@ from src.jobs.feed_recsys_jobs import (
 )
 from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.influencer_feed_job import run_influencer_feed_sync
-from src.routers.feed_recsys import router as feed_recsys_router
+from src.routers.feed_recsys import (
+    INTERNAL_VIEW_COUNTS_FULL_PATH,
+    router as feed_recsys_router,
+)
 from src.routers.health import router as health_router
 from src.routers.influencer_feed import router as influencer_feed_router
 from src.services.logger_service import LoggerService
 from src.utils.kvrocks import build_kvrocks_client
+
+PROTECTED_INTERNAL_ROUTES = frozenset(
+    {
+        ("POST", INTERNAL_VIEW_COUNTS_FULL_PATH),
+    }
+)
 
 
 def scheduler_next_run_time(
@@ -248,6 +258,12 @@ def create_app() -> FastAPI:
         LoggerService().configure(settings.log_level)
     init_sentry(settings)
     app = FastAPI(title="Feed Recsys API", lifespan=lifespan)
+    if settings is not None:
+        add_internal_request_auth_middleware(
+            app,
+            settings,
+            protected_routes=PROTECTED_INTERNAL_ROUTES,
+        )
     app.include_router(influencer_feed_router)
     app.include_router(feed_recsys_router)
     app.include_router(health_router)

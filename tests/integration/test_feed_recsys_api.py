@@ -1,8 +1,19 @@
+import json
+import time
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from src.routers.feed_recsys import router as feed_recsys_router
+from src.core.internal_request_auth import (
+    add_internal_request_auth_middleware,
+    build_internal_request_signature,
+)
+from src.routers.feed_recsys import (
+    INTERNAL_VIEW_COUNTS_FULL_PATH,
+    router as feed_recsys_router,
+)
 from src.routers.health import router as health_router
 from src.schemas.feed_recsys import FeedRecommendationWithMetadataResponse
 from src.services.publisher_profile_enrichment_service import (
@@ -186,23 +197,47 @@ class StubSettings:
     feed_recsys_publisher_profile_refresh_lock_ttl_sec = 60
 
 
-def _build_test_app() -> FastAPI:
+TEST_INTERNAL_REQUEST_SECRET = "test-internal-request-secret"
+TEST_INTERNAL_REQUEST_MAX_SKEW_SEC = 300
+TEST_PROTECTED_INTERNAL_ROUTES = frozenset(
+    {
+        ("POST", INTERNAL_VIEW_COUNTS_FULL_PATH),
+    }
+)
+TEST_INTERNAL_REQUEST_SETTINGS = SimpleNamespace(
+    internal_request_hmac_secret=TEST_INTERNAL_REQUEST_SECRET,
+    internal_request_max_skew_sec=TEST_INTERNAL_REQUEST_MAX_SKEW_SEC,
+)
+
+
+def _apply_internal_request_auth(app: FastAPI) -> None:
+    add_internal_request_auth_middleware(
+        app,
+        TEST_INTERNAL_REQUEST_SETTINGS,
+        protected_routes=TEST_PROTECTED_INTERNAL_ROUTES,
+    )
+
+
+def _build_base_test_app() -> FastAPI:
     app = FastAPI()
+    _apply_internal_request_auth(app)
     app.include_router(feed_recsys_router)
     app.include_router(health_router)
     app.state.kvrocks = StubKVRocksClient()
+    return app
+
+
+def _build_test_app() -> FastAPI:
+    app = _build_base_test_app()
     app.state.kv_feed_repository = StubKVFeedRepository()
     app.state.recommend_with_metadata_service = StubRecommendWithMetadataService()
     return app
 
 
 def _build_warm_cache_test_app() -> tuple[FastAPI, StubKVFeedRepository, StubOffchainRewardsClient]:
-    app = FastAPI()
-    app.include_router(feed_recsys_router)
-    app.include_router(health_router)
+    app = _build_base_test_app()
     kv_feed_repository = StubKVFeedRepository()
     offchain_rewards_client = StubOffchainRewardsClient()
-    app.state.kvrocks = StubKVRocksClient()
     app.state.kv_feed_repository = kv_feed_repository
     publisher_profile_enrichment_service = PublisherProfileEnrichmentService(
         clickhouse_feed_repository=StubClickHouseFeedRepository(),
@@ -225,6 +260,53 @@ def _build_warm_cache_test_app() -> tuple[FastAPI, StubKVFeedRepository, StubOff
         publisher_profile_enrichment_service=publisher_profile_enrichment_service,
     )
     return app, kv_feed_repository, offchain_rewards_client
+
+
+def _encode_json_body(payload) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _build_internal_request_headers(
+    body: bytes,
+    *,
+    path: str = INTERNAL_VIEW_COUNTS_FULL_PATH,
+    method: str = "POST",
+    timestamp: int | None = None,
+    secret: str = TEST_INTERNAL_REQUEST_SECRET,
+) -> dict[str, str]:
+    resolved_timestamp = str(int(time.time()) if timestamp is None else timestamp)
+    return {
+        "content-type": "application/json",
+        "x-internal-timestamp": resolved_timestamp,
+        "x-internal-signature": build_internal_request_signature(
+            secret=secret,
+            timestamp=resolved_timestamp,
+            method=method,
+            request_target=path,
+            body=body,
+        ),
+    }
+
+
+async def _post_internal_json(
+    client: AsyncClient,
+    path: str,
+    payload,
+    *,
+    timestamp: int | None = None,
+    secret: str = TEST_INTERNAL_REQUEST_SECRET,
+    headers: dict[str, str] | None = None,
+):
+    body = _encode_json_body(payload)
+    request_headers = _build_internal_request_headers(
+        body,
+        path=path,
+        timestamp=timestamp,
+        secret=secret,
+    )
+    if headers:
+        request_headers.update(headers)
+    return await client.post(path, content=body, headers=request_headers)
 
 
 @pytest.mark.asyncio
@@ -263,9 +345,10 @@ async def test_feed_view_count_push_api_merges_duplicate_rows_and_ignores_extra_
         transport=ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
-        response = await client.post(
-            "/api/v1/internal/feed-recsys/view-counts",
-            json=[
+        response = await _post_internal_json(
+            client,
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            [
                 {
                     "video_id": "video-1",
                     "total_count_loggedin": 3,
@@ -308,9 +391,10 @@ async def test_feed_view_count_push_api_rejects_invalid_rows():
         transport=ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
-        response = await client.post(
-            "/api/v1/internal/feed-recsys/view-counts",
-            json=[
+        response = await _post_internal_json(
+            client,
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            [
                 {
                     "video_id": " ",
                     "total_count_loggedin": -1,
@@ -323,6 +407,83 @@ async def test_feed_view_count_push_api_rejects_invalid_rows():
 
 
 @pytest.mark.asyncio
+async def test_feed_view_count_push_api_rejects_missing_internal_auth_headers():
+    app = _build_test_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            json=[
+                {
+                    "video_id": "video-1",
+                    "total_count_loggedin": 3,
+                    "total_count_all": 9,
+                }
+            ],
+        )
+
+        assert response.status_code == 401
+        assert response.json() == {"detail": "missing internal auth headers"}
+
+
+@pytest.mark.asyncio
+async def test_feed_view_count_push_api_rejects_invalid_internal_signature():
+    app = _build_test_app()
+
+    payload = [
+        {
+            "video_id": "video-1",
+            "total_count_loggedin": 3,
+            "total_count_all": 9,
+        }
+    ]
+    body = _encode_json_body(payload)
+    headers = _build_internal_request_headers(body)
+    headers["x-internal-signature"] = "bad-signature"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            content=body,
+            headers=headers,
+        )
+
+        assert response.status_code == 401
+        assert response.json() == {"detail": "invalid internal signature"}
+
+
+@pytest.mark.asyncio
+async def test_feed_view_count_push_api_rejects_stale_internal_timestamp():
+    app = _build_test_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await _post_internal_json(
+            client,
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            [
+                {
+                    "video_id": "video-1",
+                    "total_count_loggedin": 3,
+                    "total_count_all": 9,
+                }
+            ],
+            timestamp=int(time.time()) - (TEST_INTERNAL_REQUEST_MAX_SKEW_SEC + 1),
+        )
+
+        assert response.status_code == 401
+        assert response.json() == {"detail": "stale internal request timestamp"}
+
+
+@pytest.mark.asyncio
 async def test_feed_view_count_push_warms_recommendation_cache_without_offchain_lookup():
     app, _, offchain_rewards_client = _build_warm_cache_test_app()
 
@@ -330,9 +491,10 @@ async def test_feed_view_count_push_warms_recommendation_cache_without_offchain_
         transport=ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
-        push_response = await client.post(
-            "/api/v1/internal/feed-recsys/view-counts",
-            json=[
+        push_response = await _post_internal_json(
+            client,
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            [
                 {
                     "video_id": "video-1",
                     "total_count_loggedin": 15,
@@ -355,9 +517,7 @@ async def test_feed_view_count_push_warms_recommendation_cache_without_offchain_
 
 @pytest.mark.asyncio
 async def test_feed_recsys_api_handles_mixed_profile_cache_hit_stale_and_miss():
-    app = FastAPI()
-    app.include_router(feed_recsys_router)
-    app.include_router(health_router)
+    app = _build_base_test_app()
     kv_feed_repository = StubKVFeedRepository()
     publisher_profile_repository = StubPublisherProfileRepository()
     publisher_profile_repository.cached_profiles = {
@@ -369,7 +529,6 @@ async def test_feed_recsys_api_handles_mixed_profile_cache_hit_stale_and_miss():
             "profile_fetched_at": 9999999999,
         }
     }
-    app.state.kvrocks = StubKVRocksClient()
     app.state.kv_feed_repository = kv_feed_repository
     app.state.recommend_with_metadata_service = RecommendWithMetadataService(
         feed_pool_service=StubFeedPoolService(),
