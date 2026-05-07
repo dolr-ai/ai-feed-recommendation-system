@@ -221,3 +221,4 @@ one_off_markdowns/*
 
 src/adhoc_tests/
 
+temp_folder_delete_after_use

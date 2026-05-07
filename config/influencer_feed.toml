@@ -121,11 +121,56 @@ mom_w_followers = 0.10
 serve_penalty_per_count = 0.0015
 mixer_pattern = "E,E,D,E,D,E,E,D,E,D"
 curated_top_influencer_ids = [
-  "sxzhy-iu7qo-xiezk-mv7wt-e3bzi-rfbn6-2ew4g-x4jnl-ahuld-uhnos-3ae", # mysteryriya
-  "qg2pi-g3xl4-uprdd-macwr-64q7r-plotv-xm3bg-iayu3-rnpux-7ikkz-hqe", # ahaanfitness
-  "5pho3-hiuzu-atzdq-mqara-vk3sq-n47qa-ltvvf-rpwd5-3qx7a-ctdks-bqe", # DrTanya
-  "zchob-yxzst-hjmrg-um4bk-d5zwx-3s2ft-jedwo-xitfe-sg2ks-6dnxy-sae", # Kshitij
-  "azjhl-m7isb-qfocx-md5sm-z55f2-zm5qf-lss57-5zdns-ljyy4-wfv2x-rae", # arunpandit
+"jbnqb-s7rut-aojqx-ixqad-ikfeg-rcwfz-q7j66-jxrzk-hriny-wx4xa-wae",
+"mrxlj-hp3js-ev5du-2tajc-apuui-iaokz-ovgdi-n56vz-2aaj7-qyifq-oqe",
+"wef5i-qezco-jcmij-cvrrj-jlymf-hlcmg-h7x6o-ksbvx-zfbro-fpxtq-hae",
+"d72ph-45sn5-dvo6t-zepwd-247ue-wwvjb-7zfc7-72kwf-maa7z-wvhgn-6qe",
+"u4mex-4k4op-cotg7-6ztgf-utzz3-kigdc-cmlsk-x3gwv-lfrok-qcnlm-iae",
+"f2weh-snh7t-ulpme-uumve-72cmc-l3weo-narvm-32cyp-tb4v3-i7mni-cqe",
+"zyxcf-ofefb-sv2kj-xf7mu-dgkpx-eykrn-wjupe-jdfd6-pkkgs-gwrq4-iqe",
+"vju6q-qkgyc-sdnof-z2qpm-mlij2-kmsl7-rpwpo-cznpz-nzgst-v7r52-oqe",
+"2xln4-4mqdx-fygqk-zbrm4-ir4ay-phxpe-qxgn6-i5a7e-h4icq-rzcz4-yqe",
+"3v7ee-kqng4-22pda-7angw-pjjxx-vjabe-dyasj-bbdvs-jnbc4-x6aar-dae",
+"sssr5-ye6fm-xuhyn-cg5sl-ftxax-hs2cq-4bho6-r773g-6zsyv-espar-wae",
+"aeow5-nozer-mt4cj-zkepz-ewsof-h77we-z2knx-izega-t7qdh-pyngv-3qe",
+"ebikj-pgel3-syhkm-dbzda-s73rc-tcgdc-2zn67-aqv3i-fdjha-e7msu-fae",
+"dk6t5-twr5o-46evq-lt6l4-wl32t-kkhoy-jygog-j6vaz-rhkgv-7mwwg-3qe",
+"euend-zkesq-ecoyl-5kcjk-pqpck-xkh5u-ybg3g-gawew-lwyjm-bqtpo-uqe",
+"zlqx5-ppvmn-k63r2-jrkud-inht7-3snwr-sbvc7-bddye-pay4r-r7ijm-mae",
+"eseh5-mvigl-ztaxi-tfwev-lvmba-mhwee-qqryf-7kj5w-by2zp-3quys-7ae",
+"ridzf-jqmmk-x6g5x-7aa7k-4zuyu-hw6gm-yiwqe-4xvsh-ljq6b-p37pp-nqe",
+"yxlj7-gjgsb-tzcg3-nwdb4-dja42-2cjbg-jphky-ftq35-qqmee-idtei-pqe",
+"wjjoo-5ugv7-nkupc-zcxpc-szkep-v4emv-vyepc-mkjj5-ww7zk-tyuqe-mae",
+"54etj-eyidy-tssfh-hf2h2-pj3ik-6652l-zel4i-lcu2g-mzxfk-eyms3-uae",
+"o5oaq-ewol3-5z7gz-jlsi5-5qrgy-xejnf-ftemh-elldk-lbm35-slkdy-4ae",
+"2cl7i-j3c3q-zqw7j-4ot7g-ab4s4-cibvc-rbyej-7rxzf-h6r7r-5nfzv-kae",
+"dds7s-gvchl-5ryfw-o5mct-4muar-hm35n-u5aa6-rb23c-a2a4q-tczey-pae",
+"wq74g-7ops2-moczo-vhkmi-5zx3d-mmmgr-7e22x-bjuxk-3xytf-m5usi-rqe",
+"zzkgr-tm4ur-2b55i-3nkwt-6msvq-gubev-6foqc-ucj5j-nzdb7-fnvzn-rae",
+"kykxn-zdzs5-nsfz2-hzpid-4i6js-zt6cl-g574n-rapvb-ag7g3-dxn3h-tqe",
+"62ykd-mgzzu-vstoy-o7jnk-e7ctn-fgrf5-tadux-gdaxk-jmz6n-f7m35-nqe",
+"hkocm-xbslh-gtcyz-ljyhv-jdtkb-q3bsm-64myw-xdw6e-urixx-kvqnp-6qe",
+"tlq3a-4jss5-qars6-kyb65-jl6fh-yym6l-2fqux-h5q62-n2dwd-d2nh6-5ae",
+"azjhl-m7isb-qfocx-md5sm-z55f2-zm5qf-lss57-5zdns-ljyy4-wfv2x-rae",
+"ibuqx-53xxh-jdmpd-5zsj6-qb3xh-erey4-w4mry-le4pt-tkper-k5uex-fae",
+"phqo6-qovds-fxg5g-eurb2-5pd6k-zc7gs-ljlre-6iwv2-bwlvg-w4w2j-hae",
+"wv3nb-v5euy-2efrp-wjoge-lab5u-idel6-p7wks-nrhmy-fkwvw-l67uq-yae",
+"eiycn-5fkmx-kotks-kneoo-6p3yl-lvbkb-6ooqz-76nyd-k72lu-nh33w-tqe",
+"jtmnf-t7o3p-f3nko-jl47x-kjzzp-jefxx-kn4ft-ac6wf-4lyx5-5hp3a-kqe",
+"gesxu-cdkj6-ibfcp-ql5yk-expe7-l5wpj-szttp-tihyb-a5c35-j4ih3-4ae",
+"rutry-6gkgn-jvy34-getmh-ylmfc-aga66-lxblw-4fwxk-erwiu-zokav-vqe",
+"svzjg-5wq3m-em6l6-ci2y7-hdreh-ximco-fsstk-44w4w-zs3hr-7urvw-dae",
+"onxb4-kv5az-nxyoz-q7wk6-ol4ks-ggrkt-lbioy-gvxrd-ysl2r-qwnsy-tqe",
+"hfkh6-hbqtx-i4doh-67p3c-3cpp5-ukoel-i4eyq-mcuua-ywoue-wyjx5-kae",
+"5j4jc-m3tg5-4bukr-q7mri-ehthd-tx2ba-chn2j-nhggx-g43il-zsyzh-wae",
+"dca2m-xetwo-f6mcq-b64px-3iw7n-xj2uc-dw2dr-bah46-aouod-fhes6-2ae",
+"zgfg2-wvjvd-wnebs-x5wul-tz2kv-llmmv-nrj3h-nqvrp-agliw-ugnej-cae",
+"smo4n-twzz2-keb6y-vtbzo-rvcmh-vfubn-mkjh6-zopez-ds5ni-l3t3g-zae",
+"3l677-bft5w-vz7hy-bihwl-jjguj-udom2-wkl2m-lbubp-kx6os-v4fr7-iqe",
+"jmzec-euvph-7pipq-gc3s4-xd5ql-gz3fr-hnznm-ou376-qvjic-ma6sd-4ae",
+"ufhal-2qovw-fsn42-2g2k3-v5twq-piepk-tybcb-ikgpz-hyuom-si2la-jae",
+"k5z3a-bvpqv-r3lrd-eisxq-shopc-xlokf-opo5w-knoxk-bczct-3s6fz-2ae",
+"op2yv-efdud-brqgq-bdtcy-pwyvu-67yar-6ck44-iwszp-h5zxt-6xuaf-fqe",
 ]
 
 norm_lower_percentile = 5.0
