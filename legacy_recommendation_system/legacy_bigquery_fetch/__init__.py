@@ -1,5 +1,0 @@
-"""
-Legacy BigQuery Fetch Module
-
-
-"""

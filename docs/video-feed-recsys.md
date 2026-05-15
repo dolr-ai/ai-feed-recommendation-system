@@ -39,7 +39,7 @@ Per-video fields:
 - `canister_id`
 - `post_id`
 - `publisher_user_id`
-- `num_views_loggedin`
+- `num_views_loggedin` (always `0`; retained for response compatibility)
 - `num_views_all`
 - `from_ai_influencer`
 
@@ -204,10 +204,11 @@ Resolution order:
 2. off-chain rewards bulk API for misses
 
 Additional cache-fill path:
-- `POST /api/v1/internal/feed-recsys/view-counts` writes into the same cache keys used by request-path fallback
+- `POST /api/v1/internal/feed-recsys/view-counts` writes `total_count_all` into the same cache keys used by request-path fallback
 
 Cache design:
 - key is global per `video_id`
+- payload stores only `num_views_all`
 - current TTL: `12h`
 
 This keeps request latency lower without storing a full enriched feed per user.

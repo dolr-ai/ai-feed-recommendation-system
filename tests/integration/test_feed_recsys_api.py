@@ -59,13 +59,9 @@ class StubKVFeedRepository:
         for video_id, payload in view_counts.items():
             existing = self.store.get(
                 video_id,
-                {"num_views_loggedin": 0, "num_views_all": 0},
+                {"num_views_all": 0},
             )
             self.store[video_id] = {
-                "num_views_loggedin": max(
-                    int(existing.get("num_views_loggedin") or 0),
-                    int(payload.get("num_views_loggedin") or 0),
-                ),
                 "num_views_all": max(
                     int(existing.get("num_views_all") or 0),
                     int(payload.get("num_views_all") or 0),
@@ -338,7 +334,48 @@ async def test_feed_recsys_api_returns_metadata_and_ai_influencer_flag():
 
 
 @pytest.mark.asyncio
-async def test_feed_view_count_push_api_merges_duplicate_rows_and_ignores_extra_fields():
+async def test_feed_view_count_push_api_merges_duplicate_rows():
+    app = _build_test_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await _post_internal_json(
+            client,
+            INTERNAL_VIEW_COUNTS_FULL_PATH,
+            [
+                {
+                    "video_id": "video-1",
+                    "total_count_all": 9,
+                },
+                {
+                    "video_id": "video-1",
+                    "total_count_all": 7,
+                },
+                {
+                    "video_id": "video-2",
+                    "total_count_all": 2,
+                },
+            ],
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"received": 3, "upserted": 2}
+        assert app.state.kv_feed_repository.upsert_calls == [
+            {
+                "video-1": {"num_views_all": 9},
+                "video-2": {"num_views_all": 2},
+            }
+        ]
+        assert app.state.kv_feed_repository.store == {
+            "video-1": {"num_views_all": 9},
+            "video-2": {"num_views_all": 2},
+        }
+
+
+@pytest.mark.asyncio
+async def test_feed_view_count_push_api_rejects_logged_in_counts_and_reward_fields():
     app = _build_test_app()
 
     async with AsyncClient(
@@ -355,32 +392,11 @@ async def test_feed_view_count_push_api_merges_duplicate_rows_and_ignores_extra_
                     "total_count_all": 9,
                     "count": 999,
                     "last_milestone": 100,
-                },
-                {
-                    "video_id": "video-1",
-                    "total_count_loggedin": 5,
-                    "total_count_all": 7,
-                },
-                {
-                    "video_id": "video-2",
-                    "total_count_loggedin": 1,
-                    "total_count_all": 2,
-                },
+                }
             ],
         )
 
-        assert response.status_code == 200
-        assert response.json() == {"received": 3, "upserted": 2}
-        assert app.state.kv_feed_repository.upsert_calls == [
-            {
-                "video-1": {"num_views_loggedin": 5, "num_views_all": 9},
-                "video-2": {"num_views_loggedin": 1, "num_views_all": 2},
-            }
-        ]
-        assert app.state.kv_feed_repository.store == {
-            "video-1": {"num_views_loggedin": 5, "num_views_all": 9},
-            "video-2": {"num_views_loggedin": 1, "num_views_all": 2},
-        }
+        assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -397,7 +413,6 @@ async def test_feed_view_count_push_api_rejects_invalid_rows():
             [
                 {
                     "video_id": " ",
-                    "total_count_loggedin": -1,
                     "total_count_all": 2,
                 }
             ],
@@ -419,7 +434,6 @@ async def test_feed_view_count_push_api_rejects_missing_internal_auth_headers():
             json=[
                 {
                     "video_id": "video-1",
-                    "total_count_loggedin": 3,
                     "total_count_all": 9,
                 }
             ],
@@ -436,7 +450,6 @@ async def test_feed_view_count_push_api_rejects_invalid_internal_signature():
     payload = [
         {
             "video_id": "video-1",
-            "total_count_loggedin": 3,
             "total_count_all": 9,
         }
     ]
@@ -472,7 +485,6 @@ async def test_feed_view_count_push_api_rejects_stale_internal_timestamp():
             [
                 {
                     "video_id": "video-1",
-                    "total_count_loggedin": 3,
                     "total_count_all": 9,
                 }
             ],
@@ -497,7 +509,6 @@ async def test_feed_view_count_push_warms_recommendation_cache_without_offchain_
             [
                 {
                     "video_id": "video-1",
-                    "total_count_loggedin": 15,
                     "total_count_all": 20,
                 }
             ],
@@ -510,7 +521,7 @@ async def test_feed_view_count_push_warms_recommendation_cache_without_offchain_
         assert response.status_code == 200
         payload = response.json()
         assert payload["videos"][0]["video_id"] == "video-1"
-        assert payload["videos"][0]["num_views_loggedin"] == 15
+        assert payload["videos"][0]["num_views_loggedin"] == 0
         assert payload["videos"][0]["num_views_all"] == 20
         assert offchain_rewards_client.calls == []
 

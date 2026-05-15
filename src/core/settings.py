@@ -119,6 +119,8 @@ class Settings(BaseSettings):
 
     chat_api_base_url: str = Field(...)
     chat_api_timeout: int = 30
+    chat_api_max_retries: int = 2
+    chat_api_retry_backoff_sec: float = 1.0
     offchain_agent_base_url: str = "https://offchain.yral.com"
     offchain_agent_timeout: int = 15
     metadata_service_base_url: str = "https://metadata.yral.com/"

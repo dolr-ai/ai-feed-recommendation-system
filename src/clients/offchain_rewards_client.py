@@ -39,7 +39,6 @@ class OffchainRewardsClient(BaseApiClient):
             if not video_id:
                 continue
             result[video_id] = {
-                "num_views_loggedin": int(row.get("total_count_loggedin") or 0),
                 "num_views_all": int(row.get("total_count_all") or 0),
             }
         return result

@@ -19,24 +19,20 @@ from src.utils.feed_recsys_keys import (
 
 _UPSERT_VIDEO_VIEW_COUNTS_SCRIPT = """
 local key = KEYS[1]
-local incoming_loggedin = tonumber(ARGV[1]) or 0
-local incoming_all = tonumber(ARGV[2]) or 0
-local ttl = tonumber(ARGV[3]) or 0
+local incoming_all = tonumber(ARGV[1]) or 0
+local ttl = tonumber(ARGV[2]) or 0
 
-local existing_loggedin = 0
 local existing_all = 0
 local raw = redis.call("GET", key)
 
 if raw then
     local ok, decoded = pcall(cjson.decode, raw)
     if ok and decoded then
-        existing_loggedin = tonumber(decoded["num_views_loggedin"]) or 0
         existing_all = tonumber(decoded["num_views_all"]) or 0
     end
 end
 
 local merged = cjson.encode({
-    num_views_loggedin = math.max(existing_loggedin, incoming_loggedin),
     num_views_all = math.max(existing_all, incoming_all),
 })
 
@@ -374,7 +370,6 @@ class KVFeedRepository:
             except (TypeError, ValueError):
                 continue
             result[video_id] = {
-                "num_views_loggedin": int(payload.get("num_views_loggedin") or 0),
                 "num_views_all": int(payload.get("num_views_all") or 0),
             }
         return result
@@ -393,7 +388,6 @@ class KVFeedRepository:
                 _UPSERT_VIDEO_VIEW_COUNTS_SCRIPT,
                 1,
                 video_view_count_key(self._settings, video_id),
-                int(payload.get("num_views_loggedin") or 0),
                 int(payload.get("num_views_all") or 0),
                 ttl,
             )

@@ -38,7 +38,7 @@ class StubKVFeedRepository:
 
     async def get_cached_video_view_counts(self, video_ids):
         self.cached_reads.append(video_ids)
-        return {"video-1": {"num_views_loggedin": 1, "num_views_all": 2}}
+        return {"video-1": {"num_views_all": 2}}
 
     async def upsert_video_view_counts(self, view_counts):
         self.cached_writes.append(view_counts)

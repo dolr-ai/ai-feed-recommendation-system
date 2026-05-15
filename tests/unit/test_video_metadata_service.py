@@ -51,7 +51,7 @@ class StubKVFeedRepository:
         self.cached_reads = []
         self.cached_writes = []
         self.cached_result = {
-            "video-1": {"num_views_loggedin": 12, "num_views_all": 34},
+            "video-1": {"num_views_all": 34},
         }
 
     async def check_ai_influencer_ids(self, user_ids):
@@ -73,8 +73,8 @@ class StubOffchainRewardsClient:
     async def get_bulk_video_stats(self, video_ids):
         self.calls.append(video_ids)
         return {
-            "video-2": {"num_views_loggedin": 56, "num_views_all": 78},
-            "video-3": {"num_views_loggedin": 0, "num_views_all": 11},
+            "video-2": {"num_views_all": 78},
+            "video-3": {"num_views_all": 11},
         }
 
 
@@ -111,8 +111,8 @@ async def test_video_metadata_service_builds_rows_and_attaches_ai_influencer_fla
     assert kv_feed_repository.cached_reads == [["video-2", "video-1", "video-3", "missing"]]
     assert kv_feed_repository.cached_writes == [
         {
-            "video-2": {"num_views_loggedin": 56, "num_views_all": 78},
-            "video-3": {"num_views_loggedin": 0, "num_views_all": 11},
+            "video-2": {"num_views_all": 78},
+            "video-3": {"num_views_all": 11},
         }
     ]
     assert offchain_rewards_client.calls == [["video-2", "video-3", "missing"]]
@@ -121,11 +121,11 @@ async def test_video_metadata_service_builds_rows_and_attaches_ai_influencer_fla
     assert rows[0].post_id == "fallback-22"
     assert rows[0].publisher_user_id == "publisher-2"
     assert rows[0].from_ai_influencer is False
-    assert rows[0].num_views_loggedin == 56
+    assert rows[0].num_views_loggedin == 0
     assert rows[0].num_views_all == 78
     assert rows[1].publisher_user_id == "publisher-1"
     assert rows[1].from_ai_influencer is True
-    assert rows[1].num_views_loggedin == 12
+    assert rows[1].num_views_loggedin == 0
     assert rows[1].num_views_all == 34
     assert rows[2].canister_id == "profile-id"
     assert rows[2].from_ai_influencer is True
@@ -138,8 +138,8 @@ async def test_video_metadata_service_uses_cached_view_counts_without_offchain_l
     fallback_repo = StubKVVideoMetadataRepository()
     kv_feed_repository = StubKVFeedRepository()
     kv_feed_repository.cached_result = {
-        "video-1": {"num_views_loggedin": 12, "num_views_all": 34},
-        "video-2": {"num_views_loggedin": 56, "num_views_all": 78},
+        "video-1": {"num_views_all": 34},
+        "video-2": {"num_views_all": 78},
     }
     offchain_rewards_client = StubOffchainRewardsClient()
     service = VideoMetadataService(
@@ -154,7 +154,7 @@ async def test_video_metadata_service_uses_cached_view_counts_without_offchain_l
 
     assert offchain_rewards_client.calls == []
     assert kv_feed_repository.cached_writes == []
-    assert rows[0].num_views_loggedin == 56
+    assert rows[0].num_views_loggedin == 0
     assert rows[0].num_views_all == 78
-    assert rows[1].num_views_loggedin == 12
+    assert rows[1].num_views_loggedin == 0
     assert rows[1].num_views_all == 34
