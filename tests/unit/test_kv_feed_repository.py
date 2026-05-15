@@ -143,21 +143,16 @@ class FakeClient:
         self.execute_command_calls.append(args)
         if args and args[0] == "EVAL":
             key = args[3]
-            incoming_loggedin = int(args[4])
-            incoming_all = int(args[5])
+            incoming_all = int(args[4])
             existing = json.loads(self.store.get(key) or "{}")
             merged = {
-                "num_views_loggedin": max(
-                    int(existing.get("num_views_loggedin") or 0),
-                    incoming_loggedin,
-                ),
                 "num_views_all": max(
                     int(existing.get("num_views_all") or 0),
                     incoming_all,
                 ),
             }
             self.store[key] = json.dumps(merged)
-            self.expire_calls.append((key, int(args[6])))
+            self.expire_calls.append((key, int(args[5])))
             return 1
         return []
 
@@ -287,9 +282,9 @@ async def test_acquire_refill_lock_uses_nx_set():
 async def test_get_cached_video_view_counts_reads_json_payloads():
     client = FakeClient()
     client.mget_values = [
-        '{"num_views_loggedin": 7, "num_views_all": 19}',
+        '{"num_views_all": 19}',
         None,
-        '{"num_views_loggedin": 0, "num_views_all": 5}',
+        '{"num_views_all": 5}',
     ]
     settings = build_settings(storage_namespace="staging")
     repo = KVFeedRepository(client, settings)
@@ -297,8 +292,8 @@ async def test_get_cached_video_view_counts_reads_json_payloads():
     result = await repo.get_cached_video_view_counts(["video-1", "video-2", "video-3"])
 
     assert result == {
-        "video-1": {"num_views_loggedin": 7, "num_views_all": 19},
-        "video-3": {"num_views_loggedin": 0, "num_views_all": 5},
+        "video-1": {"num_views_all": 19},
+        "video-3": {"num_views_all": 5},
     }
     assert client.mget_calls == [[
         video_view_count_key(settings, "video-1"),
@@ -314,8 +309,8 @@ async def test_upsert_video_view_counts_uses_shared_ttl_and_payloads():
 
     count = await repo.upsert_video_view_counts(
         {
-            "video-1": {"num_views_loggedin": 3, "num_views_all": 8},
-            "video-2": {"num_views_loggedin": 0, "num_views_all": 1},
+            "video-1": {"num_views_all": 8},
+            "video-2": {"num_views_all": 1},
         }
     )
 
@@ -323,19 +318,17 @@ async def test_upsert_video_view_counts_uses_shared_ttl_and_payloads():
     assert [call[0] for call in client.execute_command_calls] == ["EVAL", "EVAL"]
     assert client.execute_command_calls[0][3:] == (
         video_view_count_key(settings, "video-1"),
-        3,
         8,
         settings.feed_recsys_view_count_ttl_sec,
     )
     assert client.execute_command_calls[1][3:] == (
         video_view_count_key(settings, "video-2"),
-        0,
         1,
         settings.feed_recsys_view_count_ttl_sec,
     )
     assert client.store == {
-        video_view_count_key(settings, "video-1"): '{"num_views_loggedin": 3, "num_views_all": 8}',
-        video_view_count_key(settings, "video-2"): '{"num_views_loggedin": 0, "num_views_all": 1}',
+        video_view_count_key(settings, "video-1"): '{"num_views_all": 8}',
+        video_view_count_key(settings, "video-2"): '{"num_views_all": 1}',
     }
 
 
@@ -343,15 +336,15 @@ async def test_upsert_video_view_counts_max_merges_against_existing_cache():
     client = FakeClient()
     settings = build_settings(storage_namespace="staging")
     key = video_view_count_key(settings, "video-1")
-    client.store[key] = '{"num_views_loggedin": 7, "num_views_all": 5}'
+    client.store[key] = '{"num_views_all": 5}'
     repo = KVFeedRepository(client, settings)
 
     count = await repo.upsert_video_view_counts(
-        {"video-1": {"num_views_loggedin": 3, "num_views_all": 9}}
+        {"video-1": {"num_views_all": 9}}
     )
 
     assert count == 1
-    assert client.store[key] == '{"num_views_loggedin": 7, "num_views_all": 9}'
+    assert client.store[key] == '{"num_views_all": 9}'
     assert client.expire_calls == [
         (key, settings.feed_recsys_view_count_ttl_sec),
     ]
@@ -361,15 +354,15 @@ async def test_upsert_video_view_counts_does_not_lower_stale_payloads():
     client = FakeClient()
     settings = build_settings(storage_namespace="staging")
     key = video_view_count_key(settings, "video-1")
-    client.store[key] = '{"num_views_loggedin": 11, "num_views_all": 22}'
+    client.store[key] = '{"num_views_all": 22}'
     repo = KVFeedRepository(client, settings)
 
     count = await repo.upsert_video_view_counts(
-        {"video-1": {"num_views_loggedin": 9, "num_views_all": 20}}
+        {"video-1": {"num_views_all": 20}}
     )
 
     assert count == 1
-    assert client.store[key] == '{"num_views_loggedin": 11, "num_views_all": 22}'
+    assert client.store[key] == '{"num_views_all": 22}'
     assert client.expire_calls == [
         (key, settings.feed_recsys_view_count_ttl_sec),
     ]

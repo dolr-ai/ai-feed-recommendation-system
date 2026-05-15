@@ -49,13 +49,8 @@ async def push_view_counts(
         existing = merged_rows.setdefault(
             row.video_id,
             {
-                "num_views_loggedin": 0,
                 "num_views_all": 0,
             },
-        )
-        existing["num_views_loggedin"] = max(
-            existing["num_views_loggedin"],
-            row.total_count_loggedin,
         )
         existing["num_views_all"] = max(
             existing["num_views_all"],

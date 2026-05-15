@@ -9,6 +9,7 @@ from src.core.dependencies import build_runtime_objects, close_runtime_objects
 from src.core.internal_request_auth import add_internal_request_auth_middleware
 from src.core.observability import emit_sentry_startup_test_event, init_sentry
 from src.core.settings import get_settings
+from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.feed_recsys_jobs import (
     run_feed_recsys_ai_influencer_sync,
     run_feed_recsys_bloom_sync,
@@ -20,7 +21,6 @@ from src.jobs.feed_recsys_jobs import (
     run_feed_recsys_publisher_profile_warmup_sync,
     run_feed_recsys_ugc_sync,
 )
-from src.jobs.discovery_boost_job import run_discovery_boost_refresh
 from src.jobs.influencer_feed_job import run_influencer_feed_sync
 from src.routers.feed_recsys import (
     INTERNAL_VIEW_COUNTS_FULL_PATH,
@@ -257,7 +257,14 @@ def create_app() -> FastAPI:
     if settings is not None:
         LoggerService().configure(settings.log_level)
     init_sentry(settings)
-    app = FastAPI(title="Feed Recsys API", lifespan=lifespan)
+
+    app = FastAPI(
+        title="Recommendation Engine for YRAL",
+        lifespan=lifespan,
+        openapi_url="/openapi.json",
+        redoc_url="/redoc",
+    )
+
     if settings is not None:
         add_internal_request_auth_middleware(
             app,
@@ -270,4 +277,11 @@ def create_app() -> FastAPI:
     return app
 
 
+
 app = create_app()
+
+
+@app.get("/" , tags=["Root"])
+async def root():
+    message = """Welcome to the Recommendation Engine for YRAL!"""
+    return {"message": message}

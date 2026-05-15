@@ -34,13 +34,10 @@ class FeedRecommendationWithMetadataResponse(BaseModel):
 
 
 class FeedViewCountSnapshotRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     video_id: str = Field(min_length=1)
-    total_count_loggedin: int = Field(ge=0)
     total_count_all: int = Field(ge=0)
-    count: int | None = Field(default=None, ge=0)
-    last_milestone: int | None = Field(default=None, ge=0)
 
     @field_validator("video_id")
     @classmethod

@@ -76,6 +76,8 @@ feed_recsys_view_count_ttl_sec = 43200
 
 chat_api_base_url = "https://chat-ai.rishi.yral.com"
 chat_api_timeout = 30
+chat_api_max_retries = 2
+chat_api_retry_backoff_sec = 1.0
 offchain_agent_base_url = "https://offchain.yral.com"
 offchain_agent_timeout = 15
 

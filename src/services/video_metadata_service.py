@@ -44,7 +44,6 @@ class VideoMetadataService:
                     ),
                     "post_id": str(row.get("post_id") or ""),
                     "publisher_user_id": str(row.get("publisher_user_id") or ""),
-                    "num_views_loggedin": int(counts.get("num_views_loggedin") or 0),
                     "num_views_all": int(counts.get("num_views_all") or 0),
                 }
             )

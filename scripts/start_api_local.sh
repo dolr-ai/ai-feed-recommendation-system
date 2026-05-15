@@ -13,4 +13,4 @@ export DISCOVERY_BOOST_RUN_ON_STARTUP="${DISCOVERY_BOOST_RUN_ON_STARTUP:-false}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 
-exec uvicorn src.core.app:app --host "$HOST" --port "$PORT"
+exec uvicorn src.main:app --host "$HOST" --port "$PORT"

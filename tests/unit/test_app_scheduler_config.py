@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from src.core.app import scheduler_next_run_time
+from src.main import scheduler_next_run_time
 
 
 def test_scheduler_next_run_time_returns_none_when_startup_run_disabled():

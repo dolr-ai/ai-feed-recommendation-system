@@ -38,12 +38,10 @@ async def test_get_bulk_video_stats_maps_response_fields():
         [
             {
                 "video_id": "video-1",
-                "total_count_loggedin": 7,
                 "total_count_all": 19,
             },
             {
                 "video_id": "video-2",
-                "total_count_loggedin": 0,
                 "total_count_all": 5,
             },
         ]
@@ -53,8 +51,8 @@ async def test_get_bulk_video_stats_maps_response_fields():
     result = await client.get_bulk_video_stats(["video-1", "video-2", "video-1"])
 
     assert result == {
-        "video-1": {"num_views_loggedin": 7, "num_views_all": 19},
-        "video-2": {"num_views_loggedin": 0, "num_views_all": 5},
+        "video-1": {"num_views_all": 19},
+        "video-2": {"num_views_all": 5},
     }
     assert session.calls == [
         (
