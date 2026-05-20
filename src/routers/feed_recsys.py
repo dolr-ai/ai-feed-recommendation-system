@@ -27,12 +27,6 @@ Auth type: internal HMAC. Include:
 - `x-internal-timestamp`: Unix epoch seconds.
 - `x-internal-signature`: hex HMAC-SHA256 of:
 
-```text
-{x-internal-timestamp}
-POST
-/api/v1/internal/feed-recsys/view-counts
-{raw request body bytes}
-```
 """
 
 
